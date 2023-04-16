@@ -35,8 +35,8 @@ func main() {
 	//}
 	
 	app, err := NewApp()
-        defer app.ndb.Close()
-	defer app.txCacheDb.Close()
+        //defer app.ndb.Close()
+	//defer app.txCacheDb.Close()
         defer app.accountLedgerDb.Close()
         defer app.contractLedgerDb.Close()
         defer app.accountDb.Close()

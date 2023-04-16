@@ -16,3 +16,9 @@ instructions:
 6. run go build
 7. chmod +x *
 8. run ./run.sh
+
+This is free software 
+
+Licence: GPL v3
+
+It includes a fork of Poseidon implementation package by iden3

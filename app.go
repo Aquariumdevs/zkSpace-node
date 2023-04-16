@@ -11,7 +11,7 @@ import (
 	"os"
 	//"crypto/rand"
 	"kvstore/poseidon"
-	"github.com/syndtr/goleveldb/leveldb"
+	//"github.com/syndtr/goleveldb/leveldb"
 	//"strconv"
         "github.com/tendermint/tendermint/crypto/ed25519"
         "github.com/tendermint/tendermint/crypto/encoding"
@@ -29,10 +29,10 @@ import (
 )
 
 type App struct {
-	ndb     		*leveldb.DB
-	txCacheDb     		*leveldb.DB
-	accountLedgerDb		*leveldb.DB
-	contractLedgerDb	*leveldb.DB
+	
+	//txCacheDb     		*leveldb.DB
+	accountLedgerDb		*badb.BadgerDB 
+	contractLedgerDb	*badb.BadgerDB
 	accountDb		*badb.BadgerDB
 	blockTxDb		*badb.BadgerDB
 	blockHashDb		*badb.BadgerDB
@@ -43,10 +43,7 @@ type App struct {
 	validatorTree		*arbo.Tree
 	txMap			map[[32]byte]*Transaction
 	tempAccountMap		map[[4]byte]*Account
-
-
-	//wTx	db.WriteTx
-	accountWatch	bool
+	accountWatch		bool
 }
 
 type Entry struct {
@@ -109,36 +106,35 @@ type Signature = blst.P2Affine
 type AggregateSignature = blst.P2Aggregate
 type AggregatePublicKey = blst.P1Aggregate
 
-var ValUpdates []abcitypes.ValidatorUpdate
+var valUpdates []abcitypes.ValidatorUpdate
 
 var gas = uint32(100)
 
 var prevHash []byte
-var blockHeight [8]byte
-var BlockHeight int64
-var votereward = int64(1)
+var blockheight [8]byte
+var blockHeight int64
+var voteleak = int64(1)
 var blockreward = int64(10)
 
 var txDbKeys, txDbVals [][]byte
+//var accBatch *db.Batch
 
 func NewApp() (*App, error) {
 	app := &App{}
 	
 	//initialize goleveldb databases
-	ndb, err := leveldb.OpenFile("db", nil)
-	if err != nil {
-		return nil, err
-	}
-	txCacheDb, err := leveldb.OpenFile("txCacheDb", nil)         
+	
+	//txCacheDb, err := leveldb.OpenFile("txCacheDb", nil)         
+	//if err != nil {                                  
+        //	return nil, err                              
+	//}
+	accountLedgerDb, err := badb.New(db.Options{Path: "accdb"})          
 	if err != nil {                                  
         	return nil, err                              
 	}
-	accountLedgerDb, err := leveldb.
-	OpenFile("AccountLedgerDb", nil)         
-	if err != nil {                                  
-        	return nil, err                              
-	}
-	contractLedgerDb, err := leveldb.OpenFile("contractLedgerDb", nil)
+
+	
+	contractLedgerDb, err := badb.New(db.Options{Path: "contractdb"})
         if err != nil {
                 return nil, err
         }
@@ -153,7 +149,7 @@ func NewApp() (*App, error) {
 
 	// create Tree of transactions and a write Tx buffer 
 	blockTxDb, blockTxTree, err := app.createTreeDb("badg2", 64, true)
-	//wTx := blockTxDb.WriteTx()
+	
 
 	if err != nil {
 	    	// handle error
@@ -176,7 +172,7 @@ func NewApp() (*App, error) {
 	//initialize maps for temporary storage and fast access for transactions and accounts
 	txMap := make(map[[32]byte]*Transaction)
 	tempAccountMap := make(map[[4]byte]*Account)
-	
+	/*
 	//load cached transactions from storage to the maps 
 	iter := txCacheDb.NewIterator(nil, nil)
 	defer iter.Release()
@@ -201,14 +197,13 @@ func NewApp() (*App, error) {
     		// handle error
 		panic(err)
 	}
-	
+	*/
 	// toggle for watching accounts (register a db with bls public keys as db keys
 	acW := true
 	
 	//constructing the app
-	app = &App{                                                   
-		ndb: ndb,                                               
-		txCacheDb: txCacheDb,                                 
+	app = &App{                                                                                               
+		//txCacheDb: txCacheDb,                                 
 		accountLedgerDb: accountLedgerDb,                     
 		contractLedgerDb: contractLedgerDb,  
 		accountDb: accountDb,
@@ -231,6 +226,7 @@ func NewApp() (*App, error) {
 	
 	pad := make([]byte, 64)
 	
+	
 	//first example account creation             
 
         privkey := ed25519.GenPrivKeyFromSecret([]byte("Iloveyou!"))                    
@@ -239,9 +235,8 @@ func NewApp() (*App, error) {
 	amount := []byte{1, 0, 0, 0}                                               
         accountBytes := append(amount, pubkey.Bytes()...)      
         accountBytes = append(accountBytes, pad...)
-        //accountBytes = append(accountBytes, pad...)
+        
 	account := new(Account)
-	
 	account.Data = accountBytes     
 	account.Address = firstindex
 	account.Amount = 500000
@@ -257,14 +252,14 @@ func NewApp() (*App, error) {
         amount = []byte{1, 0, 0, 0}                                 
         accountBytes = append(amount, pubkey.Bytes()...)  
         accountBytes = append(accountBytes, pad...)
-        //accountBytes = append(accountBytes, pubkey.Bytes()...)
-	account2 := new(Account)        
-	                       
+        
+	account2 := new(Account)  
 	account2.Data = accountBytes                           
 	account2.Address = firstindex
         account2.Amount = 500000              
 	                 
 	app.writeAccount(account2)
+	
 	
 	app.commitAccountsToDb()
 	
@@ -386,17 +381,16 @@ func (App) ApplySnapshotChunk(req abcitypes.RequestApplySnapshotChunk) abcitypes
 	
 func (App) EndBlock(req abcitypes.RequestEndBlock) abcitypes.ResponseEndBlock {
 
-	binary.BigEndian.PutUint64(blockHeight[:], uint64(req.Height))
-	BlockHeight = req.Height
+	binary.BigEndian.PutUint64(blockheight[:], uint64(req.Height))
+	blockHeight = req.Height
 	
-	return abcitypes.ResponseEndBlock{ValidatorUpdates: ValUpdates}
+	return abcitypes.ResponseEndBlock{ValidatorUpdates: valUpdates}
 }
 
 func (app *App) isSigned(tx *Transaction) (code bool) {
 	//load public key from account database
 	fmt.Println("Enter isSigned...")    
 	account, err := app.fetchAccount(tx.source)                        
-	
 	if err != nil {
 		return false
 	}
@@ -579,21 +573,10 @@ func (app *App) inCache(tx *Transaction) (bool) {
     	// Check the map first
     	value, found := app.txMap[tx.hash]
     	if found == false  {
-		/*
-    		// Fall back to the cache database
-    		value, err = app.txCacheDb.Get(tx.hash, nil)
-    		if err != nil {
-        		// handle error, for example:
-        		// return error or log it
-        		return false
-    		}
-		*/
 		return false
 	}
 	
     	if bytes.Equal(tx.data, value.data) {
-        	// Update the map with the transaction if it's found in the cache database
-        	//app.txMap[... 
         	return true
     	}
 
@@ -603,13 +586,12 @@ func (app *App) inCache(tx *Transaction) (bool) {
 
 func (app *App) hasValidAccounts(tx *Transaction) (code uint32) {
 	fmt.Println("Has valid accounts?")                            
-        //value, err := app.accountLedgerDb.Get(tx.source, nil)
 	
 	account, err := app.fetchAccount(tx.source)
 	if err != nil {
 		return 17
 	}
-	//tx.sourceAmount = value[:4]
+	
 	
 	if tx.target != nil {
 	        _, err = app.fetchAccount(tx.target)  
@@ -683,7 +665,7 @@ func (app *App) CheckTx(req abcitypes.RequestCheckTx) abcitypes.ResponseCheckTx 
 		code = app.isValid(tx)
 	}
 	if code == 0 {
-		app.txCacheDb.Put(tx.hash[:], tx.data, nil)
+		//app.txCacheDb.Put(tx.hash[:], tx.data, nil)
 		app.txMap[tx.hash] = tx
 	}
 	return abcitypes.ResponseCheckTx{Code: code, GasWanted: 1}
@@ -692,17 +674,14 @@ func (app *App) CheckTx(req abcitypes.RequestCheckTx) abcitypes.ResponseCheckTx 
 
 
 func (app *App) BeginBlock(req abcitypes.RequestBeginBlock) abcitypes.ResponseBeginBlock {
-	ValUpdates = make([]abcitypes.ValidatorUpdate, 0)
-	prevHash=req.Header.GetLastBlockId().Hash
+	valUpdates = make([]abcitypes.ValidatorUpdate, 0)
+	prevHash = req.Header.GetLastBlockId().Hash
 
+	wVal := app.validatorDb.WriteTx()
 	
 	//reward validators
     	for _, v := range req.LastCommitInfo.Votes {
 		var ValUpdate abcitypes.ValidatorUpdate
-		
-		if !v.SignedLastBlock {
-			continue
-		}
 		
 		_, val, err := app.validatorTree.Get(v.Validator.Address)
 		if err != nil {
@@ -714,17 +693,22 @@ func (app *App) BeginBlock(req abcitypes.RequestBeginBlock) abcitypes.ResponseBe
 			panic(err)
 		}
 		
-		ValUpdate.Power = v.Validator.Power+votereward
+		ValUpdate.Power = v.Validator.Power
 		
 		//increased reward for proposer
 		if bytes.Equal(v.Validator.Address, req.Header.ProposerAddress) {
 			ValUpdate.Power += blockreward
+		} else if v.SignedLastBlock {
+			continue
 		}
-		
-		ValUpdates = append(ValUpdates, ValUpdate)
+		//inactive validators leak power (and money)
+		if ValUpdate.Power > voteleak {
+			ValUpdate.Power -= voteleak
+		}
+		valUpdates = append(valUpdates, ValUpdate)
 		
 		binary.BigEndian.PutUint64(val[:8], uint64(ValUpdate.Power))
-		err = app.validatorTree.Update(v.Validator.Address, val)
+		err = app.validatorTree.UpdateWithTx(wVal, v.Validator.Address, val)
 		if err != nil {
 			panic(err)
 		}
@@ -742,14 +726,17 @@ func (app *App) BeginBlock(req abcitypes.RequestBeginBlock) abcitypes.ResponseBe
          		panic(err)                                    
 	 	}                                                                                                           
 		ValUpdate.Power = 0                                                                  
-		ValUpdates = append(ValUpdates, ValUpdate)
+		valUpdates = append(valUpdates, ValUpdate)
 		
 		binary.BigEndian.PutUint64(val[:8], uint64(0))
-		err = app.validatorTree.Update(b.Validator.Address, val)
+		err = app.validatorTree.UpdateWithTx(wVal, b.Validator.Address, val)
 		if err != nil {
 			panic(err)
 		}
 	}
+	
+	wVal.Commit()
+	wVal.Discard()
 	
 	return abcitypes.ResponseBeginBlock{}
 }
@@ -822,20 +809,22 @@ func (app *App) writeAccount(account *Account) {
 }
 
 func (app *App) commitAccountsToDb() {
-
+	accBatch := db.NewBatch(app.accountLedgerDb)
         wAc := app.accountDb.WriteTx()
 	
     	for _, account := range app.tempAccountMap {
         	if account.Modified {
-			app.commitAccountToDb(account, wAc)
+			app.commitAccountToDb(account, accBatch, wAc)
 		}
 	}
 	//write deliver txs results on db                     
 	wAc.Commit()                                      
 	wAc.Discard()
+	accBatch.Commit()
+	accBatch.Discard()
 }
 
-func (app *App) commitAccountToDb(account *Account, wAc db.WriteTx) {
+func (app *App) commitAccountToDb(account *Account, accBatch *db.Batch, wAc db.WriteTx) {
 
 	//add to the stream to be commited to db
 	err1 := app.accountTree.AddWithTx(wAc, account.Address, account.Data)
@@ -859,7 +848,7 @@ func (app *App) commitAccountToDb(account *Account, wAc db.WriteTx) {
 	if len(account.Data) < 84 {
 		return
 	}
-	err := app.accountLedgerDb.Put(account.Data[36:84], account.Address, nil) 
+	err := accBatch.Set(account.Data[36:84], account.Address) 
         if err != nil {     
                 //handle err      
                 fmt.Println("ACCOUNT DB WRITE ERROR!!!")              
@@ -919,6 +908,9 @@ func (app *App) DeliverTx(req abcitypes.RequestDeliverTx) abcitypes.ResponseDeli
 	txDbKeys = append(txDbKeys, key[:])
 	txDbVals = append(txDbVals, tx.hash[:])
 
+	//release space on the map by deleting the processed tx
+	delete(app.txMap, tx.hash)
+
 	return abcitypes.ResponseDeliverTx{Code: code, Data: dat}
 }
 
@@ -958,10 +950,14 @@ func (app *App) toAddress(key []byte) ([]byte) {
 func (app *App) execRelease(tx *Transaction) {
 	var val abcitypes.ValidatorUpdate
 	val.Power = 0
+	var err error
 	
 	account := app.execUpdate(tx)
 	
-	val.PubKey,_ = app.toPk(account.schnorrPubKey)
+	val.PubKey, err = app.toPk(account.schnorrPubKey)
+	if err != nil {
+		panic(err)
+	}
 	
 	addr := app.toAddress(account.schnorrPubKey)
 	
@@ -974,7 +970,7 @@ func (app *App) execRelease(tx *Transaction) {
 	binary.BigEndian.PutUint64(valAccount[:8], uint64(0))
 	app.validatorTree.Update(addr, valAccount)
 	
-	ValUpdates = append(ValUpdates, val)
+	valUpdates = append(valUpdates, val)
 	Amount := binary.BigEndian.Uint32(valAccount[:8])
 	account.Amount = Amount 
 	app.writeAccount(account)
@@ -982,11 +978,16 @@ func (app *App) execRelease(tx *Transaction) {
 
 func (app *App) execStake(tx *Transaction) {
 	account := app.execUpdate(tx)
+	var err error
 	
 	var val abcitypes.ValidatorUpdate
 	val.Power = int64(tx.Amount)
 	
-	val.PubKey,_ = app.toPk(account.schnorrPubKey)
+	val.PubKey, err = app.toPk(account.schnorrPubKey)
+	if err != nil {
+		panic(err)
+	}
+	
 	addr := app.toAddress(account.schnorrPubKey)
 	
 	_, valAccount, err := app.validatorTree.Get(addr)
@@ -1004,7 +1005,7 @@ func (app *App) execStake(tx *Transaction) {
 		app.validatorTree.Add(addr, valAccount)
 	}
 	
-	ValUpdates = append(ValUpdates, val)
+	valUpdates = append(valUpdates, val)
 }
 
 func (app *App) execCreateAccount(tx *Transaction) []byte {
@@ -1084,9 +1085,6 @@ func hashData(data []byte) ([]byte) {
 }
 
 func (app *App) Commit() abcitypes.ResponseCommit {
-	 
-	byteSlice := make([]byte, 96)
-	var resp [96]byte
 	
 	//permanent storage of account updates
 	app.commitAccountsToDb()
@@ -1098,39 +1096,58 @@ func (app *App) Commit() abcitypes.ResponseCommit {
 	app.tempAccountMap = make(map[[4]byte]*Account)	
 	
 	//get merkle roots of the trees
-	ledgerRoot,_ := app.accountTree.Root()
-	copy(byteSlice[:32], ledgerRoot)
+	ledgerRoot, err := app.accountTree.Root()
+	if err != nil {
+		panic(err)
+	}
 	
-	blockRoot,_ := app.blockTxTree.Root()
-	copy(byteSlice[32:64], blockRoot)
+	blockRoot, err := app.blockTxTree.Root()
+	if err != nil {
+		panic(err)
+	}
+	result := hashData(blockRoot)
 	
-	validatorRoot,_ := app.validatorTree.Root()
-	copy(byteSlice[64:], validatorRoot)
+	validatorRoot, err := app.validatorTree.Root()
+	if err != nil {
+		panic(err)
+	}
+	byteSlice := append(ledgerRoot, validatorRoot...)
 	
-	//poseidon hash of the roots
-	result := hashData(byteSlice)
+	//sha256 hash of the roots
+	resthash := app.sha2(byteSlice)
 	
 	//add it as a block hash to the blockhash tree
-	err := app.blockHashTree.Add(blockHeight[:], result)
+	err = app.blockHashTree.Add(blockheight[:], result)
 	if err != nil {
 		//error
 		fmt.Println("BlockHashTree Error: ", err)
+		panic(err)
 	}
 
 	//take the root to commit it
-	root,_ := app.blockHashTree.Root()
-	copy(resp[:], root)
+	chainroot, err := app.blockHashTree.Root()
+	if err != nil {
+		panic(err)
+	}
+	
+	resp := append(resthash, chainroot...)
 	fmt.Println("Commit: ", ledgerRoot, blockRoot, resp)
 	
 	// Create a new ResponseCommit message with the data and retainHeight values
     	response := abcitypes.ResponseCommit{
-     		Data: resp[:],
+     		Data: resp,
 	}
 	
 	//reset tx database periodically
-	if BlockHeight % 1024 == 0 {
-		_ = app.destroyDb(app.blockTxDb, "badg2")
-		app.blockTxDb, app.blockTxTree, _ = app.createTreeDb("badg2", 64, true)
+	if blockHeight % 1024 == 0 {
+		err = app.destroyDb(app.blockTxDb, "badg2")
+		if err != nil {
+			panic(err)
+		}
+		app.blockTxDb, app.blockTxTree, err = app.createTreeDb("badg2", 64, true)
+		if err != nil {
+			panic(err)
+		}
 	}
 	
 	// Return the ResponseCommit message
@@ -1151,7 +1168,9 @@ func (app *App) Query(reqQuery abcitypes.RequestQuery) (resQuery abcitypes.Respo
 		}
 	case 8:
 		_, val1, val2, _, err := app.blockTxTree.GenProof(key)
-		value = append(val1, val2...)
+		key = val1
+		value = val2
+		//value = append(val1, val2...)
 		//value = append(value, val3...)
 		if err != nil {
 			value = key
@@ -1168,7 +1187,6 @@ func (app *App) Query(reqQuery abcitypes.RequestQuery) (resQuery abcitypes.Respo
 	}
 	
 	
-	
 	return abcitypes.ResponseQuery{
 		Code: 0,
 		Key: key,
@@ -1178,8 +1196,8 @@ func (app *App) Query(reqQuery abcitypes.RequestQuery) (resQuery abcitypes.Respo
 
 
 func (app *App) findAccountByPubKey(blskey []byte) (*Account, error) {
-	
-	address, err := app.accountLedgerDb.Get(blskey, nil)	
+	rTx := app.accountLedgerDb.ReadTx()
+	address, err := rTx.Get(blskey)	
 	if err != nil {
 		return nil, err
 	}
@@ -1193,7 +1211,6 @@ func (app *App) findAccountByPubKey(blskey []byte) (*Account, error) {
 	}	
 	
 	return account, nil
-	
 }
 
 
