@@ -6,16 +6,20 @@ HIGHLY EXPERIMENTAL SOFTWARE
 
 HOW TO TEST IT:
 
+requirements:
+1. tendermint@v0.34.24
+2. go compiler
+
+
 instructions:
 
-1. download this folder to your pc
+1. download and unzip this folder
 2. download the tendermint executable and place it in the folder
 3. install go
-4. run go get tendermint@v0.34.24
-5. run go get ./...
-6. run go build
-7. chmod +x *
-8. run ./run.sh
+4. run go get ./...
+5. run go build
+6. chmod +x *
+7. run ./run.sh
 
 This is free software 
 

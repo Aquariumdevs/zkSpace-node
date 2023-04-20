@@ -38,11 +38,15 @@ func main() {
         //defer app.ndb.Close()
 	//defer app.txCacheDb.Close()
         defer app.accountLedgerDb.Close()
-        defer app.contractLedgerDb.Close()
+        defer app.contractDb.Close()
+        defer app.contractStorageDb.Close()
+        defer app.contractStorageDb2.Close()
         defer app.accountDb.Close()
-        defer app.blockTxDb.Close()
+        defer app.txStorageDb.Close()
+        defer app.txStorageDb2.Close()
         defer app.blockHashDb.Close()
-		
+        defer app.validatorDb.Close()
+	
 	flag.Parse()
 	node, err := newTendermint(app, configFile)
 	if err != nil {

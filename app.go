@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"sync"
 	//"crypto/rand"
 	"kvstore/poseidon"
 	//"github.com/syndtr/goleveldb/leveldb"
@@ -19,31 +20,54 @@ import (
 	//"math/big"
 	"encoding/binary"
 	"github.com/tendermint/tendermint/proto/tendermint/crypto"
-	//qt "github.com/frankban/quicktest"
 	"go.vocdoni.io/dvote/db"
 	badb "go.vocdoni.io/dvote/db/badgerdb"
-	//"github.com/dgraph-io/badger"
 	"github.com/vocdoni/arbo"
-	//"go.vocdoni.io/dvote/censustree"
-	//"go.vocdoni.io/dvote/censustree/arbotree"
 )
 
 type App struct {
 	
-	//txCacheDb     		*leveldb.DB
+	//txCacheDb     	*leveldb.DB
 	accountLedgerDb		*badb.BadgerDB 
-	contractLedgerDb	*badb.BadgerDB
+	contractDb		*badb.BadgerDB
+	contractStorageDb	*badb.BadgerDB
+	contractStorageDb2	*badb.BadgerDB
 	accountDb		*badb.BadgerDB
-	blockTxDb		*badb.BadgerDB
+	txStorageDb		*badb.BadgerDB
+	txStorageDb2		*badb.BadgerDB
 	blockHashDb		*badb.BadgerDB
 	validatorDb		*badb.BadgerDB
 	accountTree		*arbo.Tree
-	blockTxTree		*arbo.Tree
+	contractTree		*arbo.Tree
+	txStorageTree		*arbo.Tree
+	txStorageTree2		*arbo.Tree
 	blockHashTree		*arbo.Tree
 	validatorTree		*arbo.Tree
 	txMap			map[[32]byte]*Transaction
 	tempAccountMap		map[[4]byte]*Account
+	tempContractMap		map[[4]byte]*Contract
+	tempNewContractMap	map[[4]byte]*Contract
 	accountWatch		bool
+	
+	blockheight 		[8]byte
+	blockHeight 		int64
+		
+	prevHash 		[]byte
+	txDbMutex 		sync.Mutex
+	ctxDbMutex		sync.Mutex
+	valUpdates 		[]abcitypes.ValidatorUpdate
+	
+	txDbKeys, txDbVals 	[][]byte
+	
+	accountNumOnDb		int
+	contractNumOnDb		int
+	
+	dummySig		*Signature
+	dummyPk			*PublicKey
+	
+	emptyVoteLeak		int64
+	gas 			uint32 
+	blockReward		int64
 }
 
 type Entry struct {
@@ -67,11 +91,17 @@ type Transaction struct {
 	multisignature []byte
 	batchsize []byte
 	batch []byte
+	payload []byte
 	
 	hash [32]byte
 	pubkey []byte
 	sourceAmount []byte
 	counter []byte
+	pad byte
+	
+	//boolArray []bool
+	addresses []byte
+	batchedTxNum int
 	
 	Amount uint32
 	length int
@@ -86,6 +116,11 @@ type Transaction struct {
 	isStake bool
 	isDelegate bool
 	isRelease bool
+	isEvidence bool //this includes 2 distinct signatures on the same blockheight
+			//or on the same tx counter, which indicates that the user tried 
+			//to confuse the system. It will impose punishment. this is 
+			//absolutely necessary for securing batchers of transactions 
+			//against spamming from malicious users
 }
 
 type Account struct {
@@ -101,70 +136,88 @@ type Account struct {
 	Modified bool
 }
 
+type Contract struct {
+	Address []byte
+	counter []byte
+	Counter uint64
+	Payload []byte
+}
+
 type PublicKey = blst.P1Affine
 type Signature = blst.P2Affine
 type AggregateSignature = blst.P2Aggregate
 type AggregatePublicKey = blst.P1Aggregate
 
-var valUpdates []abcitypes.ValidatorUpdate
 
-var gas = uint32(100)
+var badg0 string = "badg0"
+var badg1 string = "badg1"
+var badg2 string = "badg2"
+var badg3 string = "badg3"
 
-var prevHash []byte
-var blockheight [8]byte
-var blockHeight int64
-var voteleak = int64(1)
-var blockreward = int64(10)
-
-var txDbKeys, txDbVals [][]byte
-//var accBatch *db.Batch
+var contractdb string = "contractdb"
+var contractdb2 string = "contractdb2"
 
 func NewApp() (*App, error) {
 	app := &App{}
 	
 	//initialize goleveldb databases
-	
 	//txCacheDb, err := leveldb.OpenFile("txCacheDb", nil)         
 	//if err != nil {                                  
         //	return nil, err                              
 	//}
+	
+	// create badger databases and associated arbo merkle trees
 	accountLedgerDb, err := badb.New(db.Options{Path: "accdb"})          
 	if err != nil {                                  
         	return nil, err                              
 	}
 
-	
-	contractLedgerDb, err := badb.New(db.Options{Path: "contractdb"})
+	// create 2 temporary swaping databases of contract entries	
+	contractStorageDb, err := badb.New(db.Options{Path: contractdb})
         if err != nil {
                 return nil, err
         }
 	
-	// create badger databases and associated arbo merkle trees
+	contractStorageDb2, err := badb.New(db.Options{Path: contractdb2})
+        if err != nil {
+                return nil, err
+	}
+
 	// create new Tree of accounts with maxLevels=48 and Blake2b hash function
-	accountDb, accountTree, err := app.createTreeDb("badg1", 48, false)
+	accountDb, accountTree, err := app.createTreeDb("badg", 48, false)
 	if err != nil {
 	    	fmt.Println("accountTree ledger failed!!!", err)
 		return nil, err
 	}
-
-	// create Tree of transactions and a write Tx buffer 
-	blockTxDb, blockTxTree, err := app.createTreeDb("badg2", 64, true)
 	
-
+	// create Tree of contracts
+	contractDb, contractTree, err := app.createTreeDb(badg0, 48, false)
+	if err != nil {
+	    	fmt.Println("contractTree ledger failed!!!", err)
+	}
+	
+	// create 2 temporary swaping Trees of transactions
+	
+	txStorageDb, txStorageTree, err := app.createTreeDb(badg2, 64, true)
 	if err != nil {
 	    	// handle error
-	    	fmt.Println("Tree blockTxTree failed!!!", err)
+	    	fmt.Println("Tree txStorageTree failed!!!", err)
+		return nil, err
+	}
+	txStorageDb2, txStorageTree2, err := app.createTreeDb(badg3, 64, true)
+	if err != nil {
+	    	fmt.Println("Tree txStorageTree failed!!!", err)
 		return nil, err
 	}
 	
 	//create a tree of blockhashes
-	blockHashDb, blockHashTree, err := app.createTreeDb("badg3", 64, true)
+	blockHashDb, blockHashTree, err := app.createTreeDb("badg4", 64, true)
 	if err != nil {
 	    	fmt.Println("Tree blockHashTree failed!!!", err)
 		return nil, err
 	}
 	
-	validatorDb, validatorTree, err := app.createTreeDb("badg4", 256, false)
+	validatorDb, validatorTree, err := app.createTreeDb("badg5", 256, false)
 	if err != nil {
 		fmt.Println("Validafor Tree failed", err)
 	}
@@ -172,6 +225,13 @@ func NewApp() (*App, error) {
 	//initialize maps for temporary storage and fast access for transactions and accounts
 	txMap := make(map[[32]byte]*Transaction)
 	tempAccountMap := make(map[[4]byte]*Account)
+	//app.tempContractMap = make(map[[4]byte]*Contract)	
+	//app.tempNewContractMap = make(map[[4]byte]*Contract)	
+	
+	//initialize batches
+	//app.txDbKeys = make([][]byte, 0)
+	//app.txDbVals = make([][]byte, 0)
+	
 	/*
 	//load cached transactions from storage to the maps 
 	iter := txCacheDb.NewIterator(nil, nil)
@@ -202,16 +262,27 @@ func NewApp() (*App, error) {
 	acW := true
 	
 	//constructing the app
-	app = &App{                                                                                               
+	app = &App{
+		//initialize parameters          
+		gas: uint32(100),
+        	emptyVoteLeak: int64(1),   
+		blockReward: int64(100000),                                                       
 		//txCacheDb: txCacheDb,                                 
 		accountLedgerDb: accountLedgerDb,                     
-		contractLedgerDb: contractLedgerDb,  
+		contractStorageDb: contractStorageDb,  
+		contractStorageDb2: contractStorageDb2,
+		contractDb: contractDb,  
+		//contractDb2: contractDb2,  
 		accountDb: accountDb,
-		blockTxDb: blockTxDb,
+		txStorageDb: txStorageDb,
+		txStorageDb2: txStorageDb2,
 		blockHashDb: blockHashDb,
 		validatorDb: validatorDb,
 		accountTree: accountTree,
-		blockTxTree: blockTxTree,
+		contractTree: contractTree,
+		//contractTree2: contractTree2,
+		txStorageTree: txStorageTree,
+		txStorageTree2: txStorageTree2,
 		blockHashTree: blockHashTree,
 		validatorTree: validatorTree,  
 		txMap: txMap,            
@@ -219,6 +290,9 @@ func NewApp() (*App, error) {
 		//wTx: wTx,  
 		accountWatch: acW,        
 	}			
+	
+	app.dummySig = new(Signature)
+	app.dummyPk = new(PublicKey)
 	
 	//example account creation
 	
@@ -232,14 +306,14 @@ func NewApp() (*App, error) {
         privkey := ed25519.GenPrivKeyFromSecret([]byte("Iloveyou!"))                    
         pubkey := privkey.PubKey()                                                     
         firstindex := []byte{0, 0, 0, 0}                                               
-	amount := []byte{1, 0, 0, 0}                                               
+	amount := []byte{250, 0, 0, 0}                                               
         accountBytes := append(amount, pubkey.Bytes()...)      
         accountBytes = append(accountBytes, pad...)
         
 	account := new(Account)
 	account.Data = accountBytes     
 	account.Address = firstindex
-	account.Amount = 500000
+	account.Amount = 50000000
 	
 	app.writeAccount(account)
 	
@@ -294,7 +368,10 @@ func (app *App) createTreeDb(dbname string, levels int, poseidon bool) (*badb.Ba
     		fmt.Println("Failed to access database ", dbname, " !!!", err)
              	return nil, nil, err
 	}
+	return app.createTree(dbpoint, levels, poseidon)
+}
 
+func (app *App) createTree(dbpoint *badb.BadgerDB, levels int, poseidon bool) (*badb.BadgerDB, *arbo.Tree, error) {
     	// Create a new tree associated with the database
 	var config arbo.Config
 
@@ -313,7 +390,7 @@ func (app *App) createTreeDb(dbname string, levels int, poseidon bool) (*badb.Ba
 	Tree, err := arbo.NewTree(config)
 	
     	if err != nil {
-    		fmt.Println("Failed to create tree ", dbname, " !!!", err)
+    		fmt.Println("Failed to create tree !!!", err)
         	return dbpoint, nil, err
     	}
 
@@ -352,9 +429,7 @@ func (app *App) InitChain(req abcitypes.RequestInitChain) abcitypes.ResponseInit
 		
 		pk, err := encoding.PubKeyFromProto(v.PubKey)
 		if err != nil {
-			fmt.Println("hey")
 			panic(err)
-			fmt.Println("ho")
 		}
 		
 		copy(pkey, pk.Bytes())
@@ -379,12 +454,12 @@ func (App) ApplySnapshotChunk(req abcitypes.RequestApplySnapshotChunk) abcitypes
 	return abcitypes.ResponseApplySnapshotChunk{}
 }
 	
-func (App) EndBlock(req abcitypes.RequestEndBlock) abcitypes.ResponseEndBlock {
+func (app *App) EndBlock(req abcitypes.RequestEndBlock) abcitypes.ResponseEndBlock {
 
-	binary.BigEndian.PutUint64(blockheight[:], uint64(req.Height))
-	blockHeight = req.Height
+	binary.BigEndian.PutUint64(app.blockheight[:], uint64(req.Height))
+	app.blockHeight = req.Height
 	
-	return abcitypes.ResponseEndBlock{ValidatorUpdates: valUpdates}
+	return abcitypes.ResponseEndBlock{ValidatorUpdates: app.valUpdates}
 }
 
 func (app *App) isSigned(tx *Transaction) (code bool) {
@@ -399,15 +474,15 @@ func (app *App) isSigned(tx *Transaction) (code bool) {
 	
 	tx.counter = account.counter
 	
-	fmt.Println("Schnorr pubkey:", pubkey, len(pubkey.Bytes()))
-	fmt.Println("Schnorr signature:")                            
-        fmt.Println(tx.signature)             
+	//fmt.Println("Schnorr pubkey:", pubkey, len(pubkey.Bytes()))
+	//fmt.Println("Schnorr signature:")                            
+        //fmt.Println(tx.signature)             
 	
 	hash := hashData(append(tx.hash[:], account.counter...))
 	                               
-        fmt.Println("Poseidon Hash:")                                
-        fmt.Println(hash, tx.hash)
-	fmt.Println("counter: ", account.counter)
+        //fmt.Println("Poseidon Hash:")                                
+        //fmt.Println(hash, tx.hash)
+	//fmt.Println("counter: ", account.counter)
 	
 
         if !pubkey.VerifySignature(hash[:], tx.signature) {
@@ -424,43 +499,43 @@ func (app *App) isSigned(tx *Transaction) (code bool) {
 
 func (app *App) selectTxType(tx *Transaction) (code bool) {
 	fmt.Println("Type?")                            
-	tx.source = tx.data[:4]	
+	//tx.source = tx.data[:4]	//the same on all occasions
 	
 	//transaction format and type defined by the tx blob size
 	switch tx.length {
 	case 100:
-		tx.source = tx.data[:4]
+		//tx.source = tx.data[:4]
                 tx.state = tx.data[4:]
 		tx.isUpdate = true
 		return true
        
 	case 68: //releases funds from staking (or delegation)
-		tx.source = tx.data[:4]	
+		//tx.source = tx.data[:4]	
                 tx.isRelease = true
 		return true
 	
 	case 72:
-		tx.source = tx.data[:4]
+		//tx.source = tx.data[:4]
 		tx.amount = tx.data[4:8]	
                 tx.isStake = true
 		return true
 		
 	case 74:
-		tx.source = tx.data[:4]	
+		//tx.source = tx.data[:4]	
 		tx.amount = tx.data[8:10]
 		tx.target = tx.data[4:8]
                 tx.isDelegate = true
 		return true
         
 	case 76:
-		tx.source = tx.data[:4]	
+		//tx.source = tx.data[:4]	
 		tx.target = tx.data[4:8]
 		tx.amount = tx.data[8:12]
                 tx.isTransfer = true
 		return true
 		
 	case 108:                   
-		tx.source = tx.data[:4]
+		//tx.source = tx.data[:4]
                 tx.target = tx.data[4:8]    
 		tx.amount = tx.data[8:12]
 		tx.state = tx.data[12:]
@@ -469,7 +544,7 @@ func (app *App) selectTxType(tx *Transaction) (code bool) {
 		return true
 
 	case 244: // tx change account keys 
-		tx.source = tx.data[:4]  
+		//tx.source = tx.data[:4]  
 		tx.target = nil
 		tx.amount = nil
 		tx.publickeys = tx.data[4:]   
@@ -477,45 +552,35 @@ func (app *App) selectTxType(tx *Transaction) (code bool) {
 		return true
 
         case 248: // tx create account
-		tx.source = tx.data[:4]	
+		//tx.source = tx.data[:4]	
 		tx.target = nil
 		tx.amount = tx.data[4:8]
                 tx.publickeys = tx.data[8:]
                 tx.isAccountCreator = true
 		return true
-		
-        default:                                                      
-		if tx.length < 13 {
+	
+        default:                                                   
+		if tx.length < 73 {
 			return false
 		}
-        }
-	/*
-	tx.batchsize = tx.data[12:13]
-	bs, _ := strconv.Atoi(string(tx.batchsize))
-	
-	
-	if bs == 0 {
-		tx.isContract = true
+		//tx.source = tx.data[:4]
+		tx.amount = tx.data[4:8]
+		tx.pad = tx.data[8]
+		if uint8(tx.pad) > 1 {
+			tx.isBatch = true
+		} else {
+			tx.target = tx.data[9:13]
+			tx.payload = tx.data[13:]
+			tx.isContract = true
+		}
 		return true
-	}
-	
-	if tx.length < 157 {
-                return false
         }
-
-	tx.batch = tx.data[125:]
-	
-	if len(tx.batch) == 4*bs {
-		tx.isBatch = true
-		return true
-	}
-	*/
 	return false	
 }
 
 func (app *App) blsCompressedVerify(sig *Signature, sg, blspk, msg, dst []byte) bool {
        	fmt.Println("Verifying Bls...")                            
-	if sig.VerifyCompressed(sg, false, blspk, true, msg, dst) {
+	if sig.VerifyCompressed(sg, true, blspk, true, msg, dst) {
                 fmt.Println("Pop Valid!")
                 return true
         } else {                                                             
@@ -532,9 +597,12 @@ func (app *App) sha2(data []byte) []byte {
 	return sha_2
 }
 
+func (app *App) verify(tx *Transaction) bool {
+	return true
+}
+
 func (app *App) verifyTxPop(tx *Transaction) bool {
 	var dst = []byte("BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_")
-	dummySig := new(Signature)
 	
 	//hash mecessary tx data
 	h := sha256.New()
@@ -543,10 +611,84 @@ func (app *App) verifyTxPop(tx *Transaction) bool {
 	h.Write(tx.counter)
         hash := h.Sum(nil)
 	
-	fmt.Println("POP: ", tx.pop)
-	fmt.Println("BLSPK: ", tx.blspk)
-	fmt.Println("___", tx.source, tx.counter, hash)
-	return app.blsCompressedVerify(dummySig, tx.pop, tx.blspk, hash, dst)
+	//fmt.Println("POP: ", tx.pop)
+	//fmt.Println("BLSPK: ", tx.blspk)
+	//fmt.Println("___", tx.source, tx.counter, hash)
+	return app.blsCompressedVerify(app.dummySig, tx.pop, tx.blspk, hash, dst)
+}
+
+func (app *App) countBitmap(byteSlice []byte) int {
+	//counts the number of true bits in the bitmap
+	var counter int
+	for i := range byteSlice {
+	    	for j := 0; j < 8; j++ {
+	        	if byteSlice[i]&(1<<uint(j)) != 0 {
+				counter ++
+			}
+		}
+	}
+	return counter
+}
+
+func (app *App) parseBitmap(byteSlice []byte) ([]bool, int) {
+	// convert the byte slice to a bool array
+	boolArray := make([]bool, len(byteSlice)*8)
+	var counter int
+	
+	for i := range byteSlice {
+	    	for j := 0; j < 8; j++ {
+	        	boolArray[i*8+j] = byteSlice[i]&(1<<uint(j)) != 0
+			if boolArray[i*8+j] {
+				counter ++
+			}
+	    	}
+	}
+	return boolArray, counter
+}
+
+func (app *App) verifyBatch(tx *Transaction) bool {	
+	//check that height recordes into the state is larger than the current height
+	maxheight := binary.BigEndian.Uint64(tx.state[32:40])
+	if app.blockHeight > int64(maxheight) {
+		return false
+	}
+	
+	//parse bitmap
+	bMapEnd := int(112 + tx.pad)
+	if bMapEnd > len(tx.data) {
+		return false
+	}
+	bitmap := tx.data[113 : bMapEnd]
+	tx.batchedTxNum = app.countBitmap(bitmap)
+	
+	//parse participating  account addresses
+	tx.addresses = tx.data[bMapEnd:]
+	
+	if tx.batchedTxNum * 4  >= len(tx.addresses) {
+		return false
+	}
+	
+	//collect public keys
+	var cpKeys [][]byte
+	
+	for i := 0; i < tx.batchedTxNum ; i += 4 {
+		address := tx.addresses[i : i  + 4]
+		account, err := app.fetchAccount(address)
+		if err != nil {
+			continue
+		}
+		blsPubKey := account.Data[36:84]
+		cpKeys = append(cpKeys, blsPubKey)
+	}
+	
+	// uncompress the signature and public keys
+	sig := app.dummySig.Uncompress(tx.multisignature)
+	PKeys := app.dummyPk.BatchUncompress(cpKeys)
+	
+	//verify aggregate signature
+	var dst = []byte("BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_")
+	//msg := blst.HashToG2(tx.state, dst)
+	return sig.FastAggregateVerify(false, PKeys, tx.state, dst)
 }
 
 func (app *App) verifyBlsTx(tx *Transaction) (bool) {
@@ -564,7 +706,13 @@ func (app *App) verifyBlsTx(tx *Transaction) (bool) {
 		tx.blspk = tx.data[36:84]
 		
 		return app.verifyTxPop(tx)
-	} 	
+	} 
+	
+	if tx.isBatch {
+		tx.multisignature = tx.data[9:73]
+		tx.state = tx.data[73:113]
+		return app.verifyBatch(tx)
+	}	
 		
 	return true
 }
@@ -591,8 +739,7 @@ func (app *App) hasValidAccounts(tx *Transaction) (code uint32) {
 	if err != nil {
 		return 17
 	}
-	
-	
+		
 	if tx.target != nil {
 	        _, err = app.fetchAccount(tx.target)  
 	}
@@ -604,8 +751,11 @@ func (app *App) hasValidAccounts(tx *Transaction) (code uint32) {
 	if tx.amount != nil {
         	tx.Amount = binary.BigEndian.Uint32(tx.amount)    
 	}
-	   
-	if tx.Amount + (gas * uint32(tx.length)) > account.Amount {
+
+	fmt.Println("AMOUNTS: ", tx.Amount, account.Amount)
+
+	if tx.Amount + (app.gas * uint32(tx.length)) > account.Amount {
+
 		return 23
 	}
 	
@@ -626,9 +776,10 @@ func (app *App) fetchTx(rawtx []byte, tx *Transaction) (code uint32) {
 
 	tx.signature = rawtx[:64]
 	tx.data = rawtx[64:]
+	tx.source = tx.data[:4]
 	hash := hashData(tx.data)
 	copy(tx.hash[:], hash)
-		fmt.Println(tx.data, tx.signature, tx.length)
+	//	fmt.Println(tx.data, tx.signature, tx.length)
 	return 0
 }
 	
@@ -638,12 +789,12 @@ func (app *App) isValid(tx *Transaction) (code uint32) {
 		return 33
 	}
 	
-	if !app.selectTxType(tx) {
-		return 44
-	}
-	
 	if !app.isSigned(tx) {
 		return 39
+	}
+	
+	if !app.selectTxType(tx) {
+		return 44
 	}
 	
 	if !app.verifyBlsTx(tx) {
@@ -660,7 +811,7 @@ func (app *App) CheckTx(req abcitypes.RequestCheckTx) abcitypes.ResponseCheckTx 
 	//var txr Transaction
 	tx := new(Transaction)
 	code := app.fetchTx(req.Tx, tx)
-	fmt.Println(tx.data, tx.signature, tx.length)
+	//fmt.Println(tx.data, tx.signature, tx.length)
 	if code == 0 {
 		code = app.isValid(tx)
 	}
@@ -674,10 +825,12 @@ func (app *App) CheckTx(req abcitypes.RequestCheckTx) abcitypes.ResponseCheckTx 
 
 
 func (app *App) BeginBlock(req abcitypes.RequestBeginBlock) abcitypes.ResponseBeginBlock {
-	valUpdates = make([]abcitypes.ValidatorUpdate, 0)
-	prevHash = req.Header.GetLastBlockId().Hash
+	app.valUpdates = make([]abcitypes.ValidatorUpdate, 0)
+	app.prevHash = req.Header.GetLastBlockId().Hash
 
 	wVal := app.validatorDb.WriteTx()
+	
+	valNum := int64(len(req.LastCommitInfo.Votes)*256)
 	
 	//reward validators
     	for _, v := range req.LastCommitInfo.Votes {
@@ -694,18 +847,20 @@ func (app *App) BeginBlock(req abcitypes.RequestBeginBlock) abcitypes.ResponseBe
 		}
 		
 		ValUpdate.Power = v.Validator.Power
-		
+		//fmt.Println("prePOWER: ", ValUpdate.Power)
 		//increased reward for proposer
 		if bytes.Equal(v.Validator.Address, req.Header.ProposerAddress) {
-			ValUpdate.Power += blockreward
+			//fmt.Println("REWARD!!! +", app.blockReward)
+			ValUpdate.Power += app.blockReward
 		} else if v.SignedLastBlock {
 			continue
 		}
 		//inactive validators leak power (and money)
-		if ValUpdate.Power > voteleak {
-			ValUpdate.Power -= voteleak
+		if ValUpdate.Power > app.emptyVoteLeak {
+			ValUpdate.Power -= app.emptyVoteLeak * ValUpdate.Power / valNum
 		}
-		valUpdates = append(valUpdates, ValUpdate)
+		//fmt.Println("postPOWER: ", ValUpdate.Power)
+		app.valUpdates = append(app.valUpdates, ValUpdate)
 		
 		binary.BigEndian.PutUint64(val[:8], uint64(ValUpdate.Power))
 		err = app.validatorTree.UpdateWithTx(wVal, v.Validator.Address, val)
@@ -726,7 +881,7 @@ func (app *App) BeginBlock(req abcitypes.RequestBeginBlock) abcitypes.ResponseBe
          		panic(err)                                    
 	 	}                                                                                                           
 		ValUpdate.Power = 0                                                                  
-		valUpdates = append(valUpdates, ValUpdate)
+		app.valUpdates = append(app.valUpdates, ValUpdate)
 		
 		binary.BigEndian.PutUint64(val[:8], uint64(0))
 		err = app.validatorTree.UpdateWithTx(wVal, b.Validator.Address, val)
@@ -748,7 +903,7 @@ func (app *App) fetchAccount(address []byte) (*Account, error) {
 	//maybe a previous tx has been delivered but not yet written to db 
         //check the map of temp accounts for a changed amount
         var key [4]byte
-        copy(key[:], account.Address)
+        copy(key[:], address)
                 
         v, ok := app.tempAccountMap[key]
         if ok {
@@ -785,7 +940,7 @@ func (app *App) fetchAccount(address []byte) (*Account, error) {
 }
 
 func (app *App) writeAccount(account *Account) {
-	fmt.Println("Writting...")
+	fmt.Println("Writting... new amount: ", account.Amount)
 	newData := make([]byte, 88)
 	
 	binary.BigEndian.PutUint32(newData[:4], account.Amount)
@@ -806,6 +961,57 @@ func (app *App) writeAccount(account *Account) {
 	copy(key[:], account.Address)
 	account.Modified = true
 	app.tempAccountMap[key] = account	
+}
+
+func (app *App) commitContractsToDb() {
+	app.ctxDbMutex.Lock()
+	conBatch := db.NewBatch(app.contractStorageDb)
+	wCn := app.contractDb.WriteTx()
+	
+	//prepare old contracts for updating
+    	for _, contract := range app.tempContractMap {
+		err := app.contractTree.UpdateWithTx(wCn, contract.Address, contract.counter)
+		if err != nil {
+			panic(err)
+		}
+		app.commitContractToDb(contract, conBatch)
+	}
+	
+	//commit old contracts to tree
+	wCn.Commit()
+	wCn.Discard()
+	
+	//prepare new contracts for writing on tree and db
+	zerocounter := []byte{0, 0, 0, 0, 0, 0, 0, 0}
+	var newContractKeys, newContractValues	[][]byte
+	
+    	for _, contract := range app.tempNewContractMap {
+		newContractKeys = append(newContractKeys, contract.Address[:])
+		newContractValues = append(newContractValues, zerocounter)
+		contract.counter = zerocounter[:]
+		app.commitContractToDb(contract, conBatch)
+	}
+	
+	//add new contracts to contract tree
+	app.contractTree.AddBatch(newContractKeys, newContractValues)
+	
+	//now write contract payloads to db for data availability
+	conBatch.Commit()
+	conBatch.Discard()
+	
+	app.ctxDbMutex.Unlock()
+	
+	//reset contract maps
+	app.tempContractMap = make(map[[4]byte]*Contract)
+	app.tempNewContractMap = make(map[[4]byte]*Contract)
+}
+
+func (app *App) commitContractToDb(contract *Contract, conBatch *db.Batch) {
+	address := append(contract.Address, contract.counter...)
+	err := conBatch.Set(address, contract.Payload) 
+        if err != nil {
+		panic(err)
+	}
 }
 
 func (app *App) commitAccountsToDb() {
@@ -855,7 +1061,26 @@ func (app *App) commitAccountToDb(account *Account, accBatch *db.Batch, wAc db.W
         }	
 }
 
+func (app *App) execBatch(tx *Transaction) {
+	//truncate maxheight from state
+	tx.state = tx.state[:32]
+	tx.target = tx.source
 
+	for i := 0; i < len(tx.addresses) ; i += 4 {
+		tx.source = tx.addresses[i : i  + 4]
+		tx.length = 0 //this leads to zero fees fees are paid from the batcer
+		app.execUpdate(tx) //the amount will be subtracted from every participant 
+	}
+
+        account, err := app.fetchAccount(tx.target)
+        if err != nil {
+		panic(err)
+	}
+	
+	account.Amount += tx.Amount * uint32(tx.batchedTxNum) - (app.gas * uint32(tx.length))        
+	
+        app.writeAccount(account)                                                   
+}
 
 func (app *App) DeliverTx(req abcitypes.RequestDeliverTx) abcitypes.ResponseDeliverTx {
 	//
@@ -875,29 +1100,45 @@ func (app *App) DeliverTx(req abcitypes.RequestDeliverTx) abcitypes.ResponseDeli
 	}
 	
 	if tx.isUpdate {
+		fmt.Println("update")
 		app.execUpdate(tx)
 	}
 	
 	if tx.isTransfer {
+		fmt.Println("transfer")
 		app.execTransfer(tx)
 	}
 	
 	if tx.isStake {
+		fmt.Println("stake")
 		app.execStake(tx)
 	}
 	
 	if tx.isRelease {
+		fmt.Println("release")
 		app.execRelease(tx)
 	}
-	
+
 	var dat []byte
 	
+	if tx.isContract {
+		fmt.Println("contract")
+		dat = app.execContract(tx)
+	}
+	
 	if tx.isAccountCreator {
+		fmt.Println("create")
 		dat = app.execCreateAccount(tx)
 	}
 	
 	if tx.isAccountKeyChanger {
+		fmt.Println("change")
 		app.execAccountKeyChanger(tx)
+	}
+	
+	if tx.isBatch {
+		fmt.Println("batch")
+		app.execBatch(tx)
 	}
 	
 	//add tx to the queue to be included in the tx merkle tree
@@ -905,8 +1146,8 @@ func (app *App) DeliverTx(req abcitypes.RequestDeliverTx) abcitypes.ResponseDeli
 	copy(key[:4], tx.source)
 	copy(key[:4], tx.counter)
 
-	txDbKeys = append(txDbKeys, key[:])
-	txDbVals = append(txDbVals, tx.hash[:])
+	app.txDbKeys = append(app.txDbKeys, key[:])
+	app.txDbVals = append(app.txDbVals, tx.hash[:])
 
 	//release space on the map by deleting the processed tx
 	delete(app.txMap, tx.hash)
@@ -923,7 +1164,7 @@ func (app *App) execAccountKeyChanger(tx *Transaction) {
 	account.Address = tx.source
 	
 	//fees
-	account.Amount -= (gas * uint32(tx.length))
+	account.Amount -= (app.gas * uint32(tx.length))
 	
 	//Update counter on every tx 
 	account.Counter++
@@ -965,15 +1206,15 @@ func (app *App) execRelease(tx *Transaction) {
 	if err != nil {
 		return
 	}
-	
-	//power := make([]byte, 8)
 	binary.BigEndian.PutUint64(valAccount[:8], uint64(0))
-	app.validatorTree.Update(addr, valAccount)
 	
-	valUpdates = append(valUpdates, val)
-	Amount := binary.BigEndian.Uint32(valAccount[:8])
-	account.Amount = Amount 
-	app.writeAccount(account)
+	fmt.Println(valAccount[:8])
+	app.valUpdates = append(app.valUpdates, val)
+	Amount := binary.BigEndian.Uint64(valAccount[:8])
+	account.Amount += uint32(Amount)
+	app.writeAccount(account)	
+
+	app.validatorTree.Update(addr, valAccount)
 }
 
 func (app *App) execStake(tx *Transaction) {
@@ -989,13 +1230,14 @@ func (app *App) execStake(tx *Transaction) {
 	}
 	
 	addr := app.toAddress(account.schnorrPubKey)
-	
+
 	_, valAccount, err := app.validatorTree.Get(addr)
 	if err == nil {
 		val.Power += int64(binary.BigEndian.Uint64(valAccount[:8]))
 	} else {
 		valAccount = make([]byte, 40)
 	}
+	fmt.Println(valAccount[:8])
 	binary.BigEndian.PutUint64(valAccount[:8], uint64(val.Power))
 	
 	if err == nil {
@@ -1005,7 +1247,7 @@ func (app *App) execStake(tx *Transaction) {
 		app.validatorTree.Add(addr, valAccount)
 	}
 	
-	valUpdates = append(valUpdates, val)
+	app.valUpdates = append(app.valUpdates, val)
 }
 
 func (app *App) execCreateAccount(tx *Transaction) []byte {
@@ -1014,12 +1256,11 @@ func (app *App) execCreateAccount(tx *Transaction) []byte {
 	account.Data = tx.data[4:88] 
 	
 	//find next account address
-	nextaddr, err := app.accountTree.GetNLeafs() 
-	if err != nil {
-		panic(err)
-	}
+	nextaddr := app.accountNumOnDb
+
 	account.Address = make([]byte, 4)
 	binary.BigEndian.PutUint32(account.Address, uint32(nextaddr))
+	app.accountNumOnDb++
 	
 	//change account entry
 	app.writeAccount(account)
@@ -1030,6 +1271,68 @@ func (app *App) execCreateAccount(tx *Transaction) []byte {
 	return account.Address
 }
 
+func (app *App) execContract(tx *Transaction) []byte  {    
+	
+	app.execUpdate(tx)
+
+	var key [4]byte
+	copy(key[:], tx.target)
+	
+	contract := app.fetchContract(key)
+	
+	contract.Payload = tx.payload
+	
+	if contract.Counter >= uint64(app.contractNumOnDb) {
+		app.createContract(contract, key)
+	}	else	{
+		contract.Counter++
+		app.writeContract(contract, key)
+	}
+	data := append(tx.hash[:], contract.Address...)
+	hash := hashData(data)
+	copy(tx.hash[:], hash)
+	
+	return contract.Address
+}
+
+func (app *App) createContract(contract *Contract, key [4]byte) {    	
+	var	nextaddr [4]byte
+	nextAddr := uint32(app.contractNumOnDb + len(app.tempNewContractMap))	
+	binary.BigEndian.PutUint32(nextaddr[:], nextAddr)
+	contract.Address = nextaddr[:]	
+	contract.counter = []byte{0, 0, 0, 0, 0, 0 ,0, 0}
+	app.tempNewContractMap[nextaddr] = contract
+}
+
+func (app *App) writeContract(contract *Contract, key [4]byte) {  
+	binary.BigEndian.PutUint64(contract.counter, contract.Counter)
+	app.tempContractMap[key] = contract
+}
+
+func (app *App) fetchContract(key [4]byte) *Contract {    
+	
+	contract := &Contract{} 
+	
+	//look at the map first
+	v, ok := app.tempContractMap[key]
+	if ok {
+		contract = v
+		return v
+	}
+	
+	_, counter, err := app.contractTree.Get(key[:])
+	if err != nil {
+		return contract
+	}
+	
+	contract.counter = counter
+	contract.Counter = binary.BigEndian.Uint64(counter)
+	contract.Address = key[:]
+	app.tempContractMap[key] = contract
+	
+	return contract
+}	
+
 func (app *App) execUpdate(tx *Transaction) *Account {    
 	/// update source account
 	// Fetch account
@@ -1039,8 +1342,10 @@ func (app *App) execUpdate(tx *Transaction) *Account {
 		return nil
 	}
 	
+	fmt.Println("AMOUNTS: ", tx.Amount, account.Amount)
 	// Subtract amount from account
-	account.Amount -= (tx.Amount + gas * uint32(tx.length))
+	account.Amount -= (tx.Amount + app.gas * uint32(tx.length))
+	fmt.Println("AMOUNTS: ", tx.Amount, account.Amount)
 		
 	//Update counter on every tx
 	account.Counter++
@@ -1061,14 +1366,14 @@ func (app *App) execTransfer(tx *Transaction) {
 	                     
         account, err := app.fetchAccount(tx.target)                  
         if err != nil {                                              
-                //this should not happen                             
-        } else {                                                     
-                // Subtract amount from account                      
-                account.Amount += tx.Amount                           
+                //this should not happen  
+		return                           
+        }                                     
+        // Subtract amount from account                      
+        account.Amount += tx.Amount                           
 		            
-                // Write updated account to database                 
-                app.writeAccount(account)                      
-        }
+        // Write updated account to database                 
+        app.writeAccount(account)                      
 }
 
 func hashData(data []byte) ([]byte) {
@@ -1078,10 +1383,8 @@ func hashData(data []byte) ([]byte) {
 		panic(err)
 	}
 	
-	//bLen := 32 //app.blockHashTree.HashFunction().Len()
-	
 	result := arbo.BigIntToBytes(32, h2)
-	return result  //h2.Bytes()
+	return result 
 }
 
 func (app *App) Commit() abcitypes.ResponseCommit {
@@ -1089,19 +1392,47 @@ func (app *App) Commit() abcitypes.ResponseCommit {
 	//permanent storage of account updates
 	app.commitAccountsToDb()
 	
-	//write deliver txs results on db
-	app.blockTxTree.AddBatch(txDbKeys, txDbVals)
 	
+	//write deliver txs results on db
+	app.txDbMutex.Lock()
+	app.txStorageTree.AddBatch(app.txDbKeys, app.txDbVals)
+	app.txDbMutex.Unlock()
+	
+	//take the number of total processed accounts
+	accountNumOnDb, err := app.accountTree.GetNLeafs() 
+	if err != nil {
+		panic(err)
+	}
+	app.accountNumOnDb = accountNumOnDb
+	
+	//permanent storage of contract updates
+	app.commitContractsToDb()
+
+	//take the number of total processed contracts
+	contractNumOnDb, err := app.contractTree.GetNLeafs() 
+	if err != nil {
+		panic(err)
+	}
+	app.contractNumOnDb = contractNumOnDb
+
 	//reset account map	
 	app.tempAccountMap = make(map[[4]byte]*Account)	
+	
+	//reset contract maps
+	app.tempContractMap = make(map[[4]byte]*Contract)
+	
+	//reset batches	
+	app.txDbKeys = make([][]byte, 0)
+	app.txDbVals = make([][]byte, 0)
 	
 	//get merkle roots of the trees
 	ledgerRoot, err := app.accountTree.Root()
 	if err != nil {
 		panic(err)
 	}
-	
-	blockRoot, err := app.blockTxTree.Root()
+	app.txDbMutex.Lock()
+	blockRoot, err := app.txStorageTree.Root()
+	app.txDbMutex.Unlock()
 	if err != nil {
 		panic(err)
 	}
@@ -1117,7 +1448,7 @@ func (app *App) Commit() abcitypes.ResponseCommit {
 	resthash := app.sha2(byteSlice)
 	
 	//add it as a block hash to the blockhash tree
-	err = app.blockHashTree.Add(blockheight[:], result)
+	err = app.blockHashTree.Add(app.blockheight[:], result)
 	if err != nil {
 		//error
 		fmt.Println("BlockHashTree Error: ", err)
@@ -1131,28 +1462,108 @@ func (app *App) Commit() abcitypes.ResponseCommit {
 	}
 	
 	resp := append(resthash, chainroot...)
-	fmt.Println("Commit: ", ledgerRoot, blockRoot, resp)
+	//fmt.Println("Commit: ", ledgerRoot, blockRoot, resp)
 	
 	// Create a new ResponseCommit message with the data and retainHeight values
     	response := abcitypes.ResponseCommit{
      		Data: resp,
 	}
-	
-	//reset tx database periodically
-	if blockHeight % 1024 == 0 {
-		err = app.destroyDb(app.blockTxDb, "badg2")
-		if err != nil {
-			panic(err)
-		}
-		app.blockTxDb, app.blockTxTree, err = app.createTreeDb("badg2", 64, true)
-		if err != nil {
-			panic(err)
-		}
+
+	//swap and clear old databases
+	err = app.swapDb()
+	if err != nil {
+		panic(err)
 	}
-	
+
 	// Return the ResponseCommit message
 	return response
 }
+
+func (app *App) swapDb() error {	
+	//swap and reset tx databases periodically
+	if app.blockHeight % 1024 == 0 {
+		//swap tx db
+		app.txDbMutex.Lock()
+		
+		//clear one database
+		err := app.clearDb(app.txStorageDb2)
+		if err != nil {
+			return err
+		}
+		
+		//swap db names and references
+		tempdbname := badg2
+        	badg2 = badg3
+        	badg3 = tempdbname         
+		
+        	tempdb := app.txStorageDb
+        	app.txStorageDb = app.txStorageDb2                 
+		app.txStorageDb2 = tempdb    
+		
+        	temptree := app.txStorageTree
+        	app.txStorageTree = app.txStorageTree2    
+		app.txStorageTree2 = temptree
+		
+		//reopen front db and recreate tree
+		app.txStorageDb, app.txStorageTree, err = app.createTree(app.txStorageDb, 64, true)		
+		if err != nil {
+			return err
+		}
+		
+		app.txDbMutex.Unlock()
+		
+		//swap contract db
+		app.ctxDbMutex.Lock()
+		
+		//swap db names and references
+		tempdbname = contractdb
+		contractdb = contractdb2
+		contractdb2 = tempdbname
+		
+		tempcdb := app.contractStorageDb
+		app.contractStorageDb = app.contractStorageDb2
+		app.contractStorageDb2 = tempcdb
+		
+		//reset contract db
+		err = app.clearDb(app.contractStorageDb)
+		if err != nil {
+			return err
+		}
+		
+		app.ctxDbMutex.Unlock()
+	}
+	return nil
+}
+
+func (app *App) clearDb(db *badb.BadgerDB) error {
+	// Get a write transaction
+	tx := db.WriteTx()
+
+	// Iterate through all key-value pairs
+	err := db.Iterate(nil, func(key, value []byte) bool {
+    	// Delete the key
+    	if err := tx.Delete(key); err != nil {
+        	// Handle error
+        		return false
+	    	}
+	    	return true
+	})
+
+	// Check for any errors during iteration
+	if err != nil {
+    		// Handle error
+	    	return err
+	}
+
+	// Commit the transaction to clear the database
+	err = tx.Commit()
+	if err != nil {
+	    	// Handle error
+	    	return err
+	}
+	return nil
+}
+
 
 func (app *App) Query(reqQuery abcitypes.RequestQuery) (resQuery abcitypes.ResponseQuery) {
 	resQuery.Key = reqQuery.Data
@@ -1167,7 +1578,12 @@ func (app *App) Query(reqQuery abcitypes.RequestQuery) (resQuery abcitypes.Respo
 			value = account.Data
 		}
 	case 8:
-		_, val1, val2, _, err := app.blockTxTree.GenProof(key)
+		app.txDbMutex.Lock()
+		_, val1, val2, _, err := app.txStorageTree.GenProof(key)
+		if err != nil {		
+			_, val1, val2, _, err = app.txStorageTree2.GenProof(key)
+		}
+		app.txDbMutex.Unlock()
 		key = val1
 		value = val2
 		//value = append(val1, val2...)
