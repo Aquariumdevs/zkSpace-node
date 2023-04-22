@@ -2,6 +2,7 @@
 rm -rf /home/userland/.tendermint/*
 rm -rf contractdb*
 rm -rf accdb*
+rm -rf condb
 rm -rf badg*
 rm -rf data
 #cp -r /home/userland/tm/* /home/userland/.tendermint/

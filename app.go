@@ -26,48 +26,67 @@ import (
 )
 
 type App struct {
-	
-	//txCacheDb     	*leveldb.DB
+	//databases and trees
 	accountLedgerDb		*badb.BadgerDB 
-	contractDb		*badb.BadgerDB
+	contractLedgerDb	*badb.BadgerDB 
+	
 	contractStorageDb	*badb.BadgerDB
 	contractStorageDb2	*badb.BadgerDB
+	
 	accountDb		*badb.BadgerDB
+	contractDb		*badb.BadgerDB
 	txStorageDb		*badb.BadgerDB
 	txStorageDb2		*badb.BadgerDB
 	blockHashDb		*badb.BadgerDB
 	validatorDb		*badb.BadgerDB
+	
 	accountTree		*arbo.Tree
 	contractTree		*arbo.Tree
 	txStorageTree		*arbo.Tree
 	txStorageTree2		*arbo.Tree
 	blockHashTree		*arbo.Tree
 	validatorTree		*arbo.Tree
+	
+	//transaction cache
 	txMap			map[[32]byte]*Transaction
+	
+	//account and contract cache
 	tempAccountMap		map[[4]byte]*Account
+	tempNewAccountMap	map[[4]byte]*Account
 	tempContractMap		map[[4]byte]*Contract
 	tempNewContractMap	map[[4]byte]*Contract
+	
+	//set this to build a temporary database for querrying addresses with bls keys
 	accountWatch		bool
 	
 	blockheight 		[8]byte
 	blockHeight 		int64
 		
 	prevHash 		[]byte
+	
 	txDbMutex 		sync.Mutex
 	ctxDbMutex		sync.Mutex
+	
+	//Validator updates
 	valUpdates 		[]abcitypes.ValidatorUpdate
 	
+	//transaction db entries as batch
 	txDbKeys, txDbVals 	[][]byte
 	
+	//current size of DBs
 	accountNumOnDb		int
 	contractNumOnDb		int
 	
+	//dummy curve points for bls
 	dummySig		*Signature
 	dummyPk			*PublicKey
 	
+	//financial parameters
 	emptyVoteLeak		int64
 	gas 			uint32 
 	blockReward		int64
+	
+	totalFees		uint32
 }
 
 type Entry struct {
@@ -101,7 +120,7 @@ type Transaction struct {
 	
 	//boolArray []bool
 	addresses []byte
-	batchedTxNum int
+	//batchedTxNum int
 	
 	Amount uint32
 	length int
@@ -116,6 +135,7 @@ type Transaction struct {
 	isStake bool
 	isDelegate bool
 	isRelease bool
+	isCollateral bool
 	isEvidence bool //this includes 2 distinct signatures on the same blockheight
 			//or on the same tx counter, which indicates that the user tried 
 			//to confuse the system. It will impose punishment. this is 
@@ -134,6 +154,7 @@ type Account struct {
 	Counter uint32
 	Amount  uint32
 	Modified bool
+	isNew bool
 }
 
 type Contract struct {
@@ -148,7 +169,7 @@ type Signature = blst.P2Affine
 type AggregateSignature = blst.P2Aggregate
 type AggregatePublicKey = blst.P1Aggregate
 
-
+//helper strings for swapping databases
 var badg0 string = "badg0"
 var badg1 string = "badg1"
 var badg2 string = "badg2"
@@ -160,18 +181,17 @@ var contractdb2 string = "contractdb2"
 func NewApp() (*App, error) {
 	app := &App{}
 	
-	//initialize goleveldb databases
-	//txCacheDb, err := leveldb.OpenFile("txCacheDb", nil)         
-	//if err != nil {                                  
-        //	return nil, err                              
-	//}
-	
 	// create badger databases and associated arbo merkle trees
 	accountLedgerDb, err := badb.New(db.Options{Path: "accdb"})          
 	if err != nil {                                  
         	return nil, err                              
 	}
 
+	contractLedgerDb, err := badb.New(db.Options{Path: "condb"})          
+        if err != nil {
+		return nil, err
+	}
+	
 	// create 2 temporary swaping databases of contract entries	
 	contractStorageDb, err := badb.New(db.Options{Path: contractdb})
         if err != nil {
@@ -225,8 +245,9 @@ func NewApp() (*App, error) {
 	//initialize maps for temporary storage and fast access for transactions and accounts
 	txMap := make(map[[32]byte]*Transaction)
 	tempAccountMap := make(map[[4]byte]*Account)
-	//app.tempContractMap = make(map[[4]byte]*Contract)	
-	//app.tempNewContractMap = make(map[[4]byte]*Contract)	
+	tempNewAccountMap := make(map[[4]byte]*Account)
+	tempContractMap := make(map[[4]byte]*Contract)	
+	tempNewContractMap := make(map[[4]byte]*Contract)	
 	
 	//initialize batches
 	//app.txDbKeys = make([][]byte, 0)
@@ -258,8 +279,8 @@ func NewApp() (*App, error) {
 		panic(err)
 	}
 	*/
-	// toggle for watching accounts (register a db with bls public keys as db keys
-	acW := true
+
+
 	
 	//constructing the app
 	app = &App{
@@ -267,12 +288,14 @@ func NewApp() (*App, error) {
 		gas: uint32(100),
         	emptyVoteLeak: int64(1),   
 		blockReward: int64(100000),                                                       
-		//txCacheDb: txCacheDb,                                 
-		accountLedgerDb: accountLedgerDb,                     
+		accountWatch: true, 	// toggle for watching accounts (register a db with bls public keys as db keys
+		
+		//parse databases and trees                             
+		accountLedgerDb: accountLedgerDb,
+		contractLedgerDb: contractLedgerDb,               
 		contractStorageDb: contractStorageDb,  
 		contractStorageDb2: contractStorageDb2,
-		contractDb: contractDb,  
-		//contractDb2: contractDb2,  
+		contractDb: contractDb,
 		accountDb: accountDb,
 		txStorageDb: txStorageDb,
 		txStorageDb2: txStorageDb2,
@@ -280,15 +303,17 @@ func NewApp() (*App, error) {
 		validatorDb: validatorDb,
 		accountTree: accountTree,
 		contractTree: contractTree,
-		//contractTree2: contractTree2,
 		txStorageTree: txStorageTree,
 		txStorageTree2: txStorageTree2,
 		blockHashTree: blockHashTree,
 		validatorTree: validatorTree,  
+		
+		//parse maps
 		txMap: txMap,            
-		tempAccountMap: tempAccountMap,           
-		//wTx: wTx,  
-		accountWatch: acW,        
+		tempAccountMap: tempAccountMap,     
+		tempNewAccountMap: tempNewAccountMap,     
+		tempContractMap: tempContractMap,
+		tempNewContractMap: tempNewContractMap,    
 	}			
 	
 	app.dummySig = new(Signature)
@@ -314,6 +339,7 @@ func NewApp() (*App, error) {
 	account.Data = accountBytes     
 	account.Address = firstindex
 	account.Amount = 50000000
+	account.isNew = true
 	
 	app.writeAccount(account)
 	
@@ -331,10 +357,11 @@ func NewApp() (*App, error) {
 	account2.Data = accountBytes                           
 	account2.Address = firstindex
         account2.Amount = 500000              
+	account2.isNew = true
 	                 
 	app.writeAccount(account2)
 	
-	
+		
 	app.commitAccountsToDb()
 	
 	return app, nil
@@ -375,17 +402,16 @@ func (app *App) createTree(dbpoint *badb.BadgerDB, levels int, poseidon bool) (*
     	// Create a new tree associated with the database
 	var config arbo.Config
 
+	
+    	config = arbo.Config{
+       		Database:     dbpoint,
+       		MaxLevels:    levels,
+       		HashFunction: arbo.HashFunctionBlake2b}
+    	
+	
 	if poseidon {
-    		config = arbo.Config{
-        		Database:     dbpoint,
-        		MaxLevels:    levels,
-        		HashFunction: arbo.HashFunctionPoseidon}
-	} else {
-    		config = arbo.Config{
-        		Database:     dbpoint,
-        		MaxLevels:    levels,
-        		HashFunction: arbo.HashFunctionBlake2b}
-    	}
+		config.HashFunction = arbo.HashFunctionPoseidon
+	}
 	
 	Tree, err := arbo.NewTree(config)
 	
@@ -616,7 +642,7 @@ func (app *App) verifyTxPop(tx *Transaction) bool {
 	//fmt.Println("___", tx.source, tx.counter, hash)
 	return app.blsCompressedVerify(app.dummySig, tx.pop, tx.blspk, hash, dst)
 }
-
+/*
 func (app *App) countBitmap(byteSlice []byte) int {
 	//counts the number of true bits in the bitmap
 	var counter int
@@ -645,7 +671,7 @@ func (app *App) parseBitmap(byteSlice []byte) ([]bool, int) {
 	}
 	return boolArray, counter
 }
-
+*/
 func (app *App) verifyBatch(tx *Transaction) bool {	
 	//check that height recordes into the state is larger than the current height
 	maxheight := binary.BigEndian.Uint64(tx.state[32:40])
@@ -653,25 +679,15 @@ func (app *App) verifyBatch(tx *Transaction) bool {
 		return false
 	}
 	
-	//parse bitmap
-	bMapEnd := int(112 + tx.pad)
-	if bMapEnd > len(tx.data) {
-		return false
-	}
-	bitmap := tx.data[113 : bMapEnd]
-	tx.batchedTxNum = app.countBitmap(bitmap)
-	
 	//parse participating  account addresses
-	tx.addresses = tx.data[bMapEnd:]
-	
-	if tx.batchedTxNum * 4  >= len(tx.addresses) {
-		return false
-	}
+	tx.addresses = tx.data[113:]
 	
 	//collect public keys
 	var cpKeys [][]byte
 	
-	for i := 0; i < tx.batchedTxNum ; i += 4 {
+	
+	arraySize := len(tx.addresses) - 4
+	for i := 0; i < arraySize ; i += 4 {
 		address := tx.addresses[i : i  + 4]
 		account, err := app.fetchAccount(address)
 		if err != nil {
@@ -687,7 +703,6 @@ func (app *App) verifyBatch(tx *Transaction) bool {
 	
 	//verify aggregate signature
 	var dst = []byte("BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_")
-	//msg := blst.HashToG2(tx.state, dst)
 	return sig.FastAggregateVerify(false, PKeys, tx.state, dst)
 }
 
@@ -823,7 +838,6 @@ func (app *App) CheckTx(req abcitypes.RequestCheckTx) abcitypes.ResponseCheckTx 
 }
 
 
-
 func (app *App) BeginBlock(req abcitypes.RequestBeginBlock) abcitypes.ResponseBeginBlock {
 	app.valUpdates = make([]abcitypes.ValidatorUpdate, 0)
 	app.prevHash = req.Header.GetLastBlockId().Hash
@@ -851,7 +865,7 @@ func (app *App) BeginBlock(req abcitypes.RequestBeginBlock) abcitypes.ResponseBe
 		//increased reward for proposer
 		if bytes.Equal(v.Validator.Address, req.Header.ProposerAddress) {
 			//fmt.Println("REWARD!!! +", app.blockReward)
-			ValUpdate.Power += app.blockReward
+			ValUpdate.Power += app.blockReward + int64(app.totalFees)
 		} else if v.SignedLastBlock {
 			continue
 		}
@@ -892,6 +906,8 @@ func (app *App) BeginBlock(req abcitypes.RequestBeginBlock) abcitypes.ResponseBe
 	
 	wVal.Commit()
 	wVal.Discard()
+	
+	app.totalFees = 0
 	
 	return abcitypes.ResponseBeginBlock{}
 }
@@ -960,12 +976,17 @@ func (app *App) writeAccount(account *Account) {
         var key [4]byte
 	copy(key[:], account.Address)
 	account.Modified = true
-	app.tempAccountMap[key] = account	
+	if account.isNew {
+		app.tempNewAccountMap[key] = account
+	} else {
+		app.tempAccountMap[key] = account
+	}	
 }
 
 func (app *App) commitContractsToDb() {
 	app.ctxDbMutex.Lock()
 	conBatch := db.NewBatch(app.contractStorageDb)
+	conLedgBatch := db.NewBatch(app.contractLedgerDb)
 	wCn := app.contractDb.WriteTx()
 	
 	//prepare old contracts for updating
@@ -990,6 +1011,7 @@ func (app *App) commitContractsToDb() {
 		newContractValues = append(newContractValues, zerocounter)
 		contract.counter = zerocounter[:]
 		app.commitContractToDb(contract, conBatch)
+		app.commitContractToLedger(contract, conLedgBatch)
 	}
 	
 	//add new contracts to contract tree
@@ -999,11 +1021,26 @@ func (app *App) commitContractsToDb() {
 	conBatch.Commit()
 	conBatch.Discard()
 	
+	conLedgBatch.Commit()
+	conLedgBatch.Discard()
+	
 	app.ctxDbMutex.Unlock()
 	
 	//reset contract maps
 	app.tempContractMap = make(map[[4]byte]*Contract)
 	app.tempNewContractMap = make(map[[4]byte]*Contract)
+}
+
+func (app *App) commitContractToLedger(contract *Contract, conLedgBatch *db.Batch) {
+	if !app.accountWatch {
+		return
+	}
+	
+	hash := app.sha2(contract.Payload)
+	err := conLedgBatch.Set(hash, contract.Address) 
+        if err != nil {
+		panic(err)
+	}
 }
 
 func (app *App) commitContractToDb(contract *Contract, conBatch *db.Batch) {
@@ -1023,22 +1060,42 @@ func (app *App) commitAccountsToDb() {
 			app.commitAccountToDb(account, accBatch, wAc)
 		}
 	}
+
+    	for _, account := range app.tempNewAccountMap {
+        	if account.Modified {
+			app.commitNewAccountToDb(account, accBatch, wAc)
+		}
+	}
+	
 	//write deliver txs results on db                     
 	wAc.Commit()                                      
 	wAc.Discard()
 	accBatch.Commit()
 	accBatch.Discard()
+	
+	//reset account cache
+	app.tempAccountMap = make(map[[4]byte]*Account)	
+	app.tempNewAccountMap = make(map[[4]byte]*Account)	
 }
 
 func (app *App) commitAccountToDb(account *Account, accBatch *db.Batch, wAc db.WriteTx) {
+	//add to the stream to be commited to db
+	err := app.accountTree.UpdateWithTx(wAc, account.Address, account.Data)
+	if err != nil {
+		fmt.Println("Acctree update FATAL ERROR!!!", err)
+		panic(err)
+	}
+	
+        // reset the Modified flag
+        account.Modified = false
+}
+
+func (app *App) commitNewAccountToDb(account *Account, accBatch *db.Batch, wAc db.WriteTx) {
 
 	//add to the stream to be commited to db
 	err1 := app.accountTree.AddWithTx(wAc, account.Address, account.Data)
 	if err1 != nil {
-		err2 := app.accountTree.UpdateWithTx(wAc, account.Address, account.Data)
-		if err2 != nil {
-			fmt.Println("Acctree update FATAL ERROR!!!", err1, err2)
-		}
+		fmt.Println("Acctree update FATAL ERROR!!!", err1)
 	}
 
         // reset the Modified flag
@@ -1066,7 +1123,8 @@ func (app *App) execBatch(tx *Transaction) {
 	tx.state = tx.state[:32]
 	tx.target = tx.source
 
-	for i := 0; i < len(tx.addresses) ; i += 4 {
+	length := len(tx.addresses)
+	for i := 0; i + 4 < length ; i += 4 {
 		tx.source = tx.addresses[i : i  + 4]
 		tx.length = 0 //this leads to zero fees fees are paid from the batcer
 		app.execUpdate(tx) //the amount will be subtracted from every participant 
@@ -1076,8 +1134,9 @@ func (app *App) execBatch(tx *Transaction) {
         if err != nil {
 		panic(err)
 	}
-	
-	account.Amount += tx.Amount * uint32(tx.batchedTxNum) - (app.gas * uint32(tx.length))        
+	fees := (app.gas * uint32(tx.length))
+	account.Amount += tx.Amount * uint32(length / 4) - fees   
+	app.totalFees += fees
 	
         app.writeAccount(account)                                                   
 }
@@ -1164,7 +1223,9 @@ func (app *App) execAccountKeyChanger(tx *Transaction) {
 	account.Address = tx.source
 	
 	//fees
-	account.Amount -= (app.gas * uint32(tx.length))
+	fees := (app.gas * uint32(tx.length))
+	account.Amount -= fees
+	app.totalFees += fees
 	
 	//Update counter on every tx 
 	account.Counter++
@@ -1254,6 +1315,7 @@ func (app *App) execCreateAccount(tx *Transaction) []byte {
 	fmt.Println("Creating new account...")                            
 	account := new(Account)
 	account.Data = tx.data[4:88] 
+	account.isNew = true
 	
 	//find next account address
 	nextaddr := app.accountNumOnDb
@@ -1344,7 +1406,10 @@ func (app *App) execUpdate(tx *Transaction) *Account {
 	
 	fmt.Println("AMOUNTS: ", tx.Amount, account.Amount)
 	// Subtract amount from account
-	account.Amount -= (tx.Amount + app.gas * uint32(tx.length))
+	fees := (app.gas * uint32(tx.length))
+	account.Amount -= (tx.Amount + fees)
+	app.totalFees += fees
+	
 	fmt.Println("AMOUNTS: ", tx.Amount, account.Amount)
 		
 	//Update counter on every tx
@@ -1414,12 +1479,6 @@ func (app *App) Commit() abcitypes.ResponseCommit {
 		panic(err)
 	}
 	app.contractNumOnDb = contractNumOnDb
-
-	//reset account map	
-	app.tempAccountMap = make(map[[4]byte]*Account)	
-	
-	//reset contract maps
-	app.tempContractMap = make(map[[4]byte]*Contract)
 	
 	//reset batches	
 	app.txDbKeys = make([][]byte, 0)
@@ -1572,6 +1631,10 @@ func (app *App) Query(reqQuery abcitypes.RequestQuery) (resQuery abcitypes.Respo
 	value := key
 	
 	switch len(key) {
+	case 1:
+		value = app.prevHash
+	case 2:
+		app.accountWatch = !app.accountWatch
 	case 4:
 		account, err := app.fetchAccount(key)
 		if err == nil {
@@ -1590,6 +1653,11 @@ func (app *App) Query(reqQuery abcitypes.RequestQuery) (resQuery abcitypes.Respo
 		//value = append(value, val3...)
 		if err != nil {
 			value = key
+		}
+	case 32:
+		contract, err := app.findContractBypHash(key)
+		if err == nil {
+			value = contract.Address
 		}
 	case 48:
 		fmt.Println("By key...")
@@ -1610,6 +1678,25 @@ func (app *App) Query(reqQuery abcitypes.RequestQuery) (resQuery abcitypes.Respo
 	}
 }
 
+func (app *App) findContractBypHash(pHash []byte) (*Contract, error) {
+	rTx := app.accountLedgerDb.ReadTx()
+	var address [4]byte
+	
+	addr, err := rTx.Get(pHash)	
+	if err != nil {
+		return nil, err
+	}
+	
+	copy(address[:], addr)
+	
+	contract := app.fetchContract(address)
+
+	if err != nil {
+		return nil, err
+	}
+	
+	return contract, nil
+}
 
 func (app *App) findAccountByPubKey(blskey []byte) (*Account, error) {
 	rTx := app.accountLedgerDb.ReadTx()
