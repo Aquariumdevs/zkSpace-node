@@ -6,13 +6,25 @@ HIGHLY EXPERIMENTAL SOFTWARE
 
 HOW TO TEST IT:
 
+requirements:
+1. tendermint@v0.34.24
+2. go compiler
+
+
 instructions:
 
-1. download this folder to your pc
-2. download the tendermint executable and place it in the folder
+1. download and unzip this folder in $HOME/go/apps/
+2. download the tendermint executable for your architecture and place it in the folder
 3. install go
-4. run go get tendermint@v0.34.24
-5. run go get ./...
-6. run go build
-7. chmod +x *
-8. run ./run.sh
+4. export CGO_CFLAGS="-O -D__BLST_PORTABLE__" 
+5. export CGO_CFLAGS_ALLOW="-O -D__BLST_PORTABLE__"
+6. go get ./...
+7. go build
+8. chmod +x *
+9. ./run.sh
+
+This is free software 
+
+Licence: GPL v3
+
+It includes a fork of Poseidon implementation package by iden3

@@ -2,12 +2,12 @@ package main
 
 import (
 	"flag"
-	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
-//	"github.com/syndtr/goleveldb/leveldb"
+
+	//	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/pkg/errors"
 	"github.com/spf13/viper"
 	abci "github.com/tendermint/tendermint/abci/types"
@@ -27,26 +27,24 @@ func init() {
 }
 
 func main() {
-	//db, err := leveldb.OpenFile("db", nil)
-	//db, err := badger.Open(badger.DefaultOptions("/tmp/badger"))
-	//if err != nil {
-	//	fmt.Fprintf(os.Stderr, "failed to open badger db: %v", err)
-	//	os.Exit(1)
-	//}
-	
+
 	app, err := NewApp()
-        defer app.ndb.Close()
-	defer app.txCacheDb.Close()
-        defer app.accountLedgerDb.Close()
-        defer app.contractLedgerDb.Close()
-        defer app.accountDb.Close()
-        defer app.blockTxDb.Close()
-        defer app.blockHashDb.Close()
-		
+	//defer app.ndb.Close()
+	//defer app.txCacheDb.Close()
+	defer app.accountLedgerDb.Close()
+	defer app.contractDb.Close()
+	defer app.contractStorageDb.Close()
+	defer app.contractStorageDb2.Close()
+	defer app.accountDb.Close()
+	defer app.txStorageDb.Close()
+	defer app.txStorageDb2.Close()
+	defer app.blockHashDb.Close()
+	defer app.validatorDb.Close()
+
 	flag.Parse()
 	node, err := newTendermint(app, configFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "%v", err)
+		logs.logError("Failed to start tendermint: ", err)
 		os.Exit(2)
 	}
 	node.Start()
@@ -57,7 +55,6 @@ func main() {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	<-c
-	
 
 	os.Exit(0)
 }
@@ -74,21 +71,21 @@ func newTendermint(app abci.Application, configFile string) (*nm.Node, error) {
 	}
 	if err := config.ValidateBasic(); err != nil {
 		return nil, errors.Wrap(err, "config is invalid")
-	}	// create logger
+	} // create logger
 	logger := log.NewTMLogger(log.NewSyncWriter(os.Stdout))
 	var err error
-	logger, err = tmflags.ParseLogLevel(config.LogLevel, logger,  "info")
+	logger, err = tmflags.ParseLogLevel(config.LogLevel, logger, "info")
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to parse log level")
-	}	// read private validator
+	} // read private validator
 	pv := privval.LoadFilePV(
 		config.PrivValidatorKeyFile(),
 		config.PrivValidatorStateFile(),
-	)	// read node key
+	) // read node key
 	nodeKey, err := p2p.LoadNodeKey(config.NodeKeyFile())
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to load node's key")
-	}	// create node
+	} // create node
 	node, err := nm.NewNode(
 		config,
 		pv,
