@@ -25,6 +25,7 @@ func (app *App) commitContractsToDb() {
 	for _, contract := range app.tempContractMap {
 		err := app.contractTree.UpdateWithTx(wCn, contract.Address, contract.counter)
 		if err != nil {
+			logs.logError("Failed to update contract Tree: ", err)
 			panic(err)
 		}
 		app.commitContractToDb(contract, conBatch)
@@ -73,6 +74,7 @@ func (app *App) commitContractToLedger(contract *Contract, conLedgBatch *db.Batc
 	hash := app.sha2(contract.Payload)
 	err := conLedgBatch.Set(hash, contract.Address)
 	if err != nil {
+		logs.logError("Failed to insert element to conLedgBatch: ", err)
 		panic(err)
 	}
 }
@@ -83,6 +85,7 @@ func (app *App) commitContractToDb(contract *Contract, conBatch *db.Batch) {
 	address := append(contract.Address, contract.counter...)
 	err := conBatch.Set(address, contract.Payload)
 	if err != nil {
+		logs.logError("Failed to insert element to conBatch: ", err)
 		panic(err)
 	}
 }
@@ -114,11 +117,13 @@ func (app *App) fetchContract(key [4]byte) *Contract {
 	v, ok := app.tempContractMap[key]
 	if ok {
 		contract = v
-		return v
+		return contract
 	}
 
+	/////TODO: explanation
 	_, counter, err := app.contractTree.Get(key[:])
 	if err != nil {
+		logs.dlog("Failed to get element from contract tree: ", err)
 		return contract
 	}
 

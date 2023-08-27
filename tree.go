@@ -1,8 +1,6 @@
 package main
 
 import (
-	//"fmt"
-
 	"github.com/vocdoni/arbo"
 	"go.vocdoni.io/dvote/db"
 	badb "go.vocdoni.io/dvote/db/badgerdb"

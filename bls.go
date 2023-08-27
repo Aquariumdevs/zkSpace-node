@@ -61,8 +61,5 @@ func (tx *Transaction) verifyTxPop(app *App) bool {
 	h.Write(tx.counter)
 	hash := h.Sum(nil)
 
-	//fmt.Println("POP: ", tx.pop)
-	//fmt.Println("BLSPK: ", tx.blspk)
-	//fmt.Println("___", tx.source, tx.counter, hash)
 	return tx.blsCompressedVerify(app.dummySig, tx.pop, tx.blspk, hash, dst)
 }

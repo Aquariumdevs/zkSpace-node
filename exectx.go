@@ -22,6 +22,7 @@ func (tx *Transaction) execBatch(app *App) {
 
 	account, err := app.fetchAccount(tx.target)
 	if err != nil {
+		logs.logError("Failed to fetch account: ", err)
 		panic(err)
 	}
 	account.Amount += tx.Amount*uint32(length/4) - tx.Fee
@@ -37,10 +38,16 @@ func (tx *Transaction) execRelease(app *App) {
 	val.Power = 0
 	var err error
 
-	account := tx.execUpdate(app)
+	account, err := app.fetchAccount(tx.source)
+	if err != nil {
+		//this should not happen
+		logs.logError("source account not found: ", err)
+		return
+	}
 
 	val.PubKey, err = app.toPk(account.schnorrPubKey)
 	if err != nil {
+		logs.logError("Failed to convert public key: ", err)
 		panic(err)
 	}
 
@@ -48,15 +55,21 @@ func (tx *Transaction) execRelease(app *App) {
 
 	_, valAccount, err := app.validatorTree.Get(addr)
 	if err != nil {
+		logs.logError("Failed to get element from validator tree: ", err)
 		return
 	}
-	binary.BigEndian.PutUint64(valAccount[:8], uint64(0))
 
-	logs.log(valAccount[:8])
 	app.valUpdates = append(app.valUpdates, val)
 	Amount := binary.BigEndian.Uint64(valAccount[:8])
-	account.Amount += uint32(Amount)
-	account.writeAccount(app)
+	tx.Amount = uint32(Amount)
+
+	tx.execUpdate(app)
+
+	binary.BigEndian.PutUint64(valAccount[:8], uint64(0))
+
+	logs.log("Updated validator amount (binary) and valpower: ")
+	logs.log(valAccount[:8])
+	logs.log(val.Power)
 
 	app.validatorTree.Update(addr, valAccount)
 }
@@ -72,6 +85,7 @@ func (tx *Transaction) execStake(app *App) {
 
 	val.PubKey, err = app.toPk(account.schnorrPubKey)
 	if err != nil {
+		logs.logError("Failed to convert public key: ", err)
 		panic(err)
 	}
 
@@ -81,14 +95,19 @@ func (tx *Transaction) execStake(app *App) {
 	if err == nil {
 		val.Power += int64(binary.BigEndian.Uint64(valAccount[:8]))
 	} else {
+		logs.log("Validator not found, creating new...")
 		valAccount = make([]byte, 40)
 	}
-	logs.log(valAccount[:8])
+
 	binary.BigEndian.PutUint64(valAccount[:8], uint64(val.Power))
+	logs.log("Updated validator amount (binary) and power: ")
+	logs.log(valAccount[:8])
+	logs.log(val.Power)
 
 	if err == nil {
 		app.validatorTree.Update(addr, valAccount)
 	} else {
+		logs.log("Validator not found, adding new...")
 		copy(valAccount[8:], account.schnorrPubKey)
 		app.validatorTree.Add(addr, valAccount)
 	}
@@ -110,9 +129,14 @@ func (tx *Transaction) execUpdate(app *App) *Account {
 
 	logs.log("Update source account: ")
 	logs.logAccount(account)
-	// Subtract amount from account
 
-	account.Amount -= (tx.Amount + tx.Fee)
+	if tx.isRelease {
+		// Add amount and subtract Fee from account
+		account.Amount += (tx.Amount - tx.Fee)
+	} else {
+		// Subtract amount and Fee from account
+		account.Amount -= (tx.Amount + tx.Fee)
+	}
 	app.totalFees += tx.Fee
 
 	//Update counter on every tx
@@ -208,6 +232,7 @@ func (tx *Transaction) execContract(app *App) []byte {
 
 	contract.Payload = tx.payload
 
+	/////TODO: explanation, logs
 	if contract.Counter >= uint64(app.contractNumOnDb) {
 		contract.createContract(app, key)
 	} else {

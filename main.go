@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"syscall"
 
-	//	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/pkg/errors"
 	"github.com/spf13/viper"
 	abci "github.com/tendermint/tendermint/abci/types"

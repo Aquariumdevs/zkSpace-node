@@ -26,6 +26,12 @@ func (logs *Logger) log(str interface{}) {
 	}
 }
 
+func (logs *Logger) dlog(str string, intrfc interface{}) {
+	if logs.debugLogs {
+		fmt.Println(colorGreen(str), intrfc)
+	}
+}
+
 func (logs *Logger) logError(str string, err error) {
 	fmt.Println(colorBlue(str), colorRed(err))
 }

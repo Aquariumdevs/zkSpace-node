@@ -122,7 +122,7 @@ func (tx *Transaction) verify() bool {
 func (tx *Transaction) verifyBatch(app *App) bool {
 	logs.log("verifying batch")
 
-	//check that height recordes into the state is larger than the current height
+	//check that height recorded into the state is not larger than the current height
 	maxheight := binary.BigEndian.Uint64(tx.state[32:40])
 	if app.blockHeight > int64(maxheight) {
 		return false

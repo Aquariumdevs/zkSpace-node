@@ -1,9 +1,7 @@
 package main
 
 import (
-	//"fmt"
 	"os"
-
 	badb "go.vocdoni.io/dvote/db/badgerdb"
 )
 
@@ -49,7 +47,7 @@ func (app *App) clearDb(db *badb.BadgerDB) error {
 
 	// Check for any errors during iteration
 	if err != nil {
-		logs.logError("ClearDb iteration Failed in one entry: ", err)
+		logs.logError("ClearDb iteration Failed: ", err)
 		return err
 	}
 
@@ -111,6 +109,7 @@ func (app *App) swapDb() error {
 		//reset contract db
 		err = app.clearDb(app.contractStorageDb)
 		if err != nil {
+			logs.logError("Failed to clear contract storage database: ", err)
 			return err
 		}
 

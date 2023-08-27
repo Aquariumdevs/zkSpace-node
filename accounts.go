@@ -144,7 +144,6 @@ func (account *Account) commitNewAccountToDb(app *App, accBatch *db.Batch, wAc d
 	}
 	err := accBatch.Set(account.Data[36:84], account.Address)
 	if err != nil {
-		//handle err
 		logs.logError("ACCOUNT DB WRITE ERROR!!!", err)
 	}
 }
@@ -200,6 +199,7 @@ func (app *App) findAccountByPubKey(blskey []byte) (*Account, error) {
 	rTx := app.accountLedgerDb.ReadTx()
 	address, err := rTx.Get(blskey)
 	if err != nil {
+		logs.log("Failed to get address by bls key: ")
 		return nil, err
 	}
 

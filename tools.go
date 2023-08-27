@@ -3,29 +3,10 @@ package main
 
 import (
 	"crypto/sha256"
-	//"errors"
-	//blst "github.com/supranational/blst/bindings/go"
-	//"bytes"
-	//"fmt"
-	//"os"
-	//"sync"
-
-	//abcitypes "github.com/tendermint/tendermint/abci/types"
-
-	//"crypto/rand"
-
 	"kvstore/poseidon"
-	//"github.com/syndtr/goleveldb/leveldb"
-	//"strconv"
 	"github.com/tendermint/tendermint/crypto/ed25519"
 	"github.com/tendermint/tendermint/crypto/encoding"
-
-	//"encoding/binary"
-	//"math/big"
-	//"encoding/binary"
 	"github.com/tendermint/tendermint/proto/tendermint/crypto"
-	//"go.vocdoni.io/dvote/db"
-	//badb "go.vocdoni.io/dvote/db/badgerdb"
 	"github.com/vocdoni/arbo"
 )
 
@@ -58,6 +39,7 @@ func (app *App) toPk(key []byte) (crypto.PublicKey, error) {
 
 	pkp, err := encoding.PubKeyToProto(pke)
 	if err != nil {
+		logs.logError("Failed to encode public key :", err)
 		panic(err)
 		return pkp, err
 	}

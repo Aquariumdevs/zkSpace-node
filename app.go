@@ -2,8 +2,6 @@ package main
 
 import (
 	"bytes"
-	//"errors"
-	//"fmt"
 	"sync"
 
 	abcitypes "github.com/tendermint/tendermint/abci/types"
@@ -115,40 +113,38 @@ func NewApp() (*App, error) {
 	// create new Tree of accounts with maxLevels=48 and Blake2b hash function
 	accountDb, accountTree, err := app.createTreeDb("badg", 48, false)
 	if err != nil {
-		logs.logError("accountTree ledger failed!!!", err)
+		logs.logError("accountTree initialization failed!!!", err)
 		return nil, err
 	}
 
 	// create Tree of contracts
 	contractDb, contractTree, err := app.createTreeDb(badg0, 48, false)
 	if err != nil {
-		logs.logError("contractTree ledger failed!!!", err)
+		logs.logError("contractTree initialization failed!!!", err)
 	}
 
 	// create 2 temporary swaping Trees of transactions
-
 	txStorageDb, txStorageTree, err := app.createTreeDb(badg2, 64, true)
 	if err != nil {
-		// handle error
-		logs.logError("Tree txStorageTree failed!!!", err)
+		logs.logError("Tree txStorageTree initialization failed!!!", err)
 		return nil, err
 	}
 	txStorageDb2, txStorageTree2, err := app.createTreeDb(badg3, 64, true)
 	if err != nil {
-		logs.logError("Tree txStorageTree failed!!!", err)
+		logs.logError("Tree txStorageTree initialization failed!!!", err)
 		return nil, err
 	}
 
 	//create a tree of blockhashes
 	blockHashDb, blockHashTree, err := app.createTreeDb("badg4", 64, true)
 	if err != nil {
-		logs.logError("Tree blockHashTree failed!!!", err)
+		logs.logError("Tree blockHashTree initialization failed!!!", err)
 		return nil, err
 	}
 
 	validatorDb, validatorTree, err := app.createTreeDb("badg5", 256, false)
 	if err != nil {
-		logs.logError("Validafor Tree failed", err)
+		logs.logError("Validafor Tree initialization failed", err)
 	}
 
 	//initialize maps for temporary storage and fast access for transactions and accounts
@@ -163,7 +159,7 @@ func NewApp() (*App, error) {
 		//initialize parameters
 		gas:           uint32(100),
 		emptyVoteLeak: int64(1),
-		blockReward:   int64(100000),
+		blockReward:   int64(10000000),
 		accountWatch:  true, // toggle for watching accounts (register a db with bls public keys as db keys
 
 		//parse databases and trees
@@ -245,6 +241,7 @@ func (app *App) InitChain(req abcitypes.RequestInitChain) abcitypes.ResponseInit
 
 		pk, err := encoding.PubKeyFromProto(v.PubKey)
 		if err != nil {
+			logs.logError("Pubkey encoding failed: ", err)
 			panic(err)
 		}
 
@@ -258,6 +255,7 @@ func (app *App) InitChain(req abcitypes.RequestInitChain) abcitypes.ResponseInit
 		// Initialize the application state with the initial validator set
 		err = app.validatorTree.Add(addr, valAccount)
 		if err != nil {
+			logs.logError("Validafor Tree failed to grow", err)
 			panic(err)
 		}
 	}
@@ -274,7 +272,7 @@ func (app *App) EndBlock(req abcitypes.RequestEndBlock) abcitypes.ResponseEndBlo
 
 	binary.BigEndian.PutUint64(app.blockheight[:], uint64(req.Height))
 	app.blockHeight = req.Height
-
+	logs.dlog("valUpdates: ", app.valUpdates)
 	return abcitypes.ResponseEndBlock{ValidatorUpdates: app.valUpdates}
 }
 
@@ -311,33 +309,47 @@ func (app *App) BeginBlock(req abcitypes.RequestBeginBlock) abcitypes.ResponseBe
 
 		_, val, err := app.validatorTree.Get(v.Validator.Address)
 		if err != nil {
+			logs.logError("Failed to get element from Validafor Tree: ", err)
 			panic(err)
 		}
 
 		ValUpdate.PubKey, err = app.toPk(val[8:])
 		if err != nil {
+			logs.logError("Public key convertion failed: ", err)
 			panic(err)
 		}
 
-		ValUpdate.Power = v.Validator.Power
-		//fmt.Println("prePOWER: ", ValUpdate.Power)
+		logs.dlog("Validator: ", v.Validator.Address)
+
+		ValUpdate.Power = int64(binary.BigEndian.Uint64(val[:8]))
+
+		if ValUpdate.Power == 0 {
+			continue
+		}
+
+		//ValUpdate.Power = v.Validator.Power
+		logs.dlog("POWER before: ", ValUpdate.Power)
 		//increased reward for proposer
 		if bytes.Equal(v.Validator.Address, req.Header.ProposerAddress) {
-			//fmt.Println("REWARD!!! +", app.blockReward)
-			ValUpdate.Power += app.blockReward + int64(app.totalFees)
+			totalReward := app.blockReward + int64(app.totalFees)
+			ValUpdate.Power += totalReward
+			logs.dlog("REWARD!!! +", totalReward)
 		} else if v.SignedLastBlock {
 			continue
 		}
 		//inactive validators leak power (and money)
-		if ValUpdate.Power > app.emptyVoteLeak {
-			ValUpdate.Power -= app.emptyVoteLeak * ValUpdate.Power / valNum
+		leak := app.emptyVoteLeak * ValUpdate.Power / valNum
+		if ValUpdate.Power > leak {
+			ValUpdate.Power -= leak
 		}
-		//fmt.Println("postPOWER: ", ValUpdate.Power)
+		logs.dlog("LEAK: -", leak)
+		logs.dlog("POWER after: ", ValUpdate.Power)
 		app.valUpdates = append(app.valUpdates, ValUpdate)
 
 		binary.BigEndian.PutUint64(val[:8], uint64(ValUpdate.Power))
 		err = app.validatorTree.UpdateWithTx(wVal, v.Validator.Address, val)
 		if err != nil {
+			logs.logError("Validafor Tree update failed", err)
 			panic(err)
 		}
 	}
@@ -347,10 +359,12 @@ func (app *App) BeginBlock(req abcitypes.RequestBeginBlock) abcitypes.ResponseBe
 		var ValUpdate abcitypes.ValidatorUpdate
 		_, val, err := app.validatorTree.Get(b.Validator.Address)
 		if err != nil {
+			logs.logError("Failed to retrieve element from Validafor Tree: ", err)
 			panic(err)
 		}
 		ValUpdate.PubKey, err = app.toPk(val[8:])
 		if err != nil {
+			logs.logError("Public key convertion failed: ", err)
 			panic(err)
 		}
 		ValUpdate.Power = 0
@@ -359,6 +373,7 @@ func (app *App) BeginBlock(req abcitypes.RequestBeginBlock) abcitypes.ResponseBe
 		binary.BigEndian.PutUint64(val[:8], uint64(0))
 		err = app.validatorTree.UpdateWithTx(wVal, b.Validator.Address, val)
 		if err != nil {
+			logs.logError("Validafor Tree update failed", err)
 			panic(err)
 		}
 	}
@@ -460,6 +475,7 @@ func (app *App) Commit() abcitypes.ResponseCommit {
 	//take the number of total processed accounts
 	accountNumOnDb, err := app.accountTree.GetNLeafs()
 	if err != nil {
+		logs.logError("Failed to count leaves on the Account Tree: ", err)
 		panic(err)
 	}
 	app.accountNumOnDb = accountNumOnDb
@@ -470,6 +486,7 @@ func (app *App) Commit() abcitypes.ResponseCommit {
 	//take the number of total processed contracts
 	contractNumOnDb, err := app.contractTree.GetNLeafs()
 	if err != nil {
+		logs.logError("Failed to count leaves on the Contract Tree: ", err)
 		panic(err)
 	}
 	app.contractNumOnDb = contractNumOnDb
@@ -481,18 +498,21 @@ func (app *App) Commit() abcitypes.ResponseCommit {
 	//get merkle roots of the trees
 	ledgerRoot, err := app.accountTree.Root()
 	if err != nil {
+		logs.logError("Failed to get the Account Tree root: ", err)
 		panic(err)
 	}
 	app.txDbMutex.Lock()
 	blockRoot, err := app.txStorageTree.Root()
 	app.txDbMutex.Unlock()
 	if err != nil {
+		logs.logError("Failed to get the Transaction storage Tree root: ", err)
 		panic(err)
 	}
 	result := app.poseidon(blockRoot)
 
 	validatorRoot, err := app.validatorTree.Root()
 	if err != nil {
+		logs.logError("Failed to get the Validator Tree root: ", err)
 		panic(err)
 	}
 	byteSlice := append(ledgerRoot, validatorRoot...)
@@ -511,11 +531,15 @@ func (app *App) Commit() abcitypes.ResponseCommit {
 	//take the root to commit it
 	chainroot, err := app.blockHashTree.Root()
 	if err != nil {
+		logs.logError("Failed to get the BlockHash Tree root: ", err)
 		panic(err)
 	}
 
 	resp := append(resthash, chainroot...)
-	//fmt.Println("Commit: ", ledgerRoot, blockRoot, resp)
+	logs.log("Commit: ")
+	logs.log(ledgerRoot)
+	logs.log(blockRoot)
+	logs.log(resp)
 
 	// Create a new ResponseCommit message with the data and retainHeight values
 	response := abcitypes.ResponseCommit{
@@ -525,6 +549,7 @@ func (app *App) Commit() abcitypes.ResponseCommit {
 	//swap and clear old databases
 	err = app.swapDb()
 	if err != nil {
+		logs.logError("Swapping databases Failed: ", err)
 		panic(err)
 	}
 
@@ -537,11 +562,13 @@ func (app *App) Query(reqQuery abcitypes.RequestQuery) (resQuery abcitypes.Respo
 	key := reqQuery.Data
 	logs.log("Query:")
 	logs.log(key)
+
 	value := key
 
 	switch len(key) {
 	case 1:
 		value = app.prevHash
+
 	case 2:
 		app.accountWatch = !app.accountWatch
 	case 4:
@@ -578,6 +605,9 @@ func (app *App) Query(reqQuery abcitypes.RequestQuery) (resQuery abcitypes.Respo
 		logs.log("DEFAULT")
 		value = key
 	}
+
+	logs.log("Response:")
+	logs.log(value)
 
 	return abcitypes.ResponseQuery{
 		Code:  0,
