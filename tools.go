@@ -4,6 +4,8 @@ package main
 import (
 	"crypto/sha256"
 	"kvstore/poseidon"
+
+	"github.com/tendermint/tendermint/abci/types"
 	"github.com/tendermint/tendermint/crypto/ed25519"
 	"github.com/tendermint/tendermint/crypto/encoding"
 	"github.com/tendermint/tendermint/proto/tendermint/crypto"
@@ -44,4 +46,22 @@ func (app *App) toPk(key []byte) (crypto.PublicKey, error) {
 		return pkp, err
 	}
 	return pkp, nil
+}
+
+func (app *App) removeDuplicateValidatorUpdates() {
+	seen := make(map[string]types.ValidatorUpdate)
+
+	// Iterate through the updates and keep the rightmost occurrences
+	for _, update := range app.valUpdates {
+		key := update.PubKey.String()
+		seen[key] = update
+	}
+
+	// delete the updates slice
+	app.valUpdates = make([]types.ValidatorUpdate, 0)
+
+	// Refill the slice from the map values
+	for _, update := range seen {
+		app.valUpdates = append(app.valUpdates, update)
+	}
 }

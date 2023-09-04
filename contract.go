@@ -40,7 +40,7 @@ func (app *App) commitContractsToDb() {
 	var newContractKeys, newContractValues [][]byte
 
 	for _, contract := range app.tempNewContractMap {
-		newContractKeys = append(newContractKeys, contract.Address[:])
+		newContractKeys = append(newContractKeys, contract.Address)
 		newContractValues = append(newContractValues, zerocounter)
 		contract.counter = zerocounter[:]
 		app.commitContractToDb(contract, conBatch)
@@ -103,7 +103,7 @@ func (contract *Contract) createContract(app *App, key [4]byte) {
 
 func (contract *Contract) writeContract(app *App, key [4]byte) {
 	logs.log("Writting contract to temporary map... ")
-
+	contract.counter = make([]byte, 8)
 	binary.BigEndian.PutUint64(contract.counter, contract.Counter)
 	app.tempContractMap[key] = contract
 }

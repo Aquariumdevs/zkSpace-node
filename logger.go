@@ -1,7 +1,6 @@
 package main
 
 import (
-	//"errors"
 	"fmt"
 
 	"github.com/fatih/color"
@@ -15,7 +14,9 @@ var colorBlue = color.New(color.FgBlue).SprintFunc()
 
 type Logger struct {
 	//set this to log all internal values
-	debugLogs bool
+	debugLogs     bool
+	followAccount bool
+	followTx      bool
 }
 
 var logs Logger
@@ -37,7 +38,7 @@ func (logs *Logger) logError(str string, err error) {
 }
 
 func (logs *Logger) logAccount(account *Account) {
-	if logs.debugLogs {
+	if logs.followAccount {
 		logs.printAccount(account)
 	}
 }
@@ -58,7 +59,7 @@ func (logs *Logger) printAccount(account *Account) {
 }
 
 func (logs *Logger) logTx(tx *Transaction) {
-	if logs.debugLogs {
+	if logs.followTx {
 		logs.printTx(tx)
 	}
 }

@@ -273,6 +273,8 @@ func (app *App) EndBlock(req abcitypes.RequestEndBlock) abcitypes.ResponseEndBlo
 	binary.BigEndian.PutUint64(app.blockheight[:], uint64(req.Height))
 	app.blockHeight = req.Height
 	logs.dlog("valUpdates: ", app.valUpdates)
+	app.removeDuplicateValidatorUpdates()
+
 	return abcitypes.ResponseEndBlock{ValidatorUpdates: app.valUpdates}
 }
 
@@ -338,10 +340,12 @@ func (app *App) BeginBlock(req abcitypes.RequestBeginBlock) abcitypes.ResponseBe
 			continue
 		}
 		//inactive validators leak power (and money)
-		leak := app.emptyVoteLeak * ValUpdate.Power / valNum
-		if ValUpdate.Power > leak {
-			ValUpdate.Power -= leak
+		leak := app.emptyVoteLeak*ValUpdate.Power/valNum + 1
+		if ValUpdate.Power < leak {
+			continue
 		}
+		ValUpdate.Power -= leak
+
 		logs.dlog("LEAK: -", leak)
 		logs.dlog("POWER after: ", ValUpdate.Power)
 		app.valUpdates = append(app.valUpdates, ValUpdate)

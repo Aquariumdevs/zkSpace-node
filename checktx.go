@@ -24,6 +24,7 @@ func (tx *Transaction) isSigned(app *App) (code bool) {
 
 	//signature verification
 	if !pubkey.VerifySignature(hash[:], tx.signature) {
+		logs.log("Bad signature")
 		logs.logTx(tx)
 		return false
 	}
@@ -165,6 +166,7 @@ func (tx *Transaction) inCache(app *App) bool {
 	}
 
 	if bytes.Equal(tx.data, value.data) {
+		logs.log("Already in cache!")
 		return true
 	}
 
@@ -203,6 +205,7 @@ func (tx *Transaction) verifyFee(account *Account, app *App) (code uint32) {
 
 	tx.Fee = app.gas * uint32(tx.length)
 	if tx.Amount+tx.Fee > account.Amount {
+		logs.log("NO!")
 		return 23
 	}
 	return 0
@@ -215,11 +218,13 @@ func (tx *Transaction) fetchTx(rawtx []byte, app *App) (code uint32) {
 
 	//tx max size check
 	if tx.length > 1401 {
+		logs.log("Too big!")
 		return 1
 	}
 
 	// tx min size check
 	if tx.length < 68 {
+		logs.log("Too small!")
 		return 2
 	}
 

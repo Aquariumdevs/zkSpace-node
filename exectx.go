@@ -223,17 +223,19 @@ func (tx *Transaction) execCreateAccount(app *App) []byte {
 func (tx *Transaction) execContract(app *App) []byte {
 	logs.log("Executing contract")
 
-	tx.execUpdate(app)
-
 	var key [4]byte
 	copy(key[:], tx.target)
+
+	Target := binary.BigEndian.Uint32(tx.target)
+
+	tx.execUpdate(app)
 
 	contract := app.fetchContract(key)
 
 	contract.Payload = tx.payload
-
+	///key insteadof counter???
 	/////TODO: explanation, logs
-	if contract.Counter >= uint64(app.contractNumOnDb) {
+	if Target >= uint32(app.contractNumOnDb) {
 		contract.createContract(app, key)
 	} else {
 		contract.Counter++
