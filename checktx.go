@@ -20,7 +20,7 @@ func (tx *Transaction) isSigned(app *App) (code bool) {
 
 	//parse message data
 	tx.counter = account.counter
-	hash := app.poseidon(append(tx.hash[:], account.counter...))
+	hash := app.sha2(append(tx.hash[:], account.counter...))
 
 	//signature verification
 	if !pubkey.VerifySignature(hash[:], tx.signature) {
@@ -232,7 +232,7 @@ func (tx *Transaction) fetchTx(rawtx []byte, app *App) (code uint32) {
 	tx.signature = rawtx[:64]
 	tx.data = rawtx[64:]
 	tx.source = tx.data[:4]
-	hash := app.poseidon(tx.data)
+	hash := app.sha2(tx.data)
 	copy(tx.hash[:], hash)
 
 	return 0

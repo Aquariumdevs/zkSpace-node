@@ -2,7 +2,7 @@
 package main
 
 import (
-	"crypto/sha256"
+	"golang.org/x/crypto/sha3"
 
 	blst "github.com/supranational/blst/bindings/go"
 )
@@ -55,7 +55,7 @@ func (tx *Transaction) verifyTxPop(app *App) bool {
 	var dst = []byte("BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_")
 
 	//hash mecessary tx data
-	h := sha256.New()
+	h := sha3.New256()
 	h.Write(tx.blspk)
 	h.Write(tx.source)
 	h.Write(tx.counter)

@@ -9,6 +9,7 @@ import (
 	"github.com/tendermint/tendermint/crypto/encoding"
 
 	"encoding/binary"
+	"encoding/hex"
 
 	"github.com/vocdoni/arbo"
 	"go.vocdoni.io/dvote/db"
@@ -203,6 +204,11 @@ func NewApp() (*App, error) {
 
 	//second example account creation
 	app.createTemplateAccount([]byte("Iloveher"), 500000)
+
+	//third example account creation
+	hx := make([]byte, 32)
+	hx, _ = hex.DecodeString("69c8349c1581cbe6cab3f137a6c17d9011f93dfde3d3716d0912d321f43b341c")
+	app.createTemplateAccount(hx[:], 50000000)
 
 	app.commitAccountsToDb()
 
@@ -512,7 +518,7 @@ func (app *App) Commit() abcitypes.ResponseCommit {
 		logs.logError("Failed to get the Transaction storage Tree root: ", err)
 		panic(err)
 	}
-	result := app.poseidon(blockRoot)
+	result := app.sha2(blockRoot)
 
 	validatorRoot, err := app.validatorTree.Root()
 	if err != nil {

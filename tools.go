@@ -3,28 +3,28 @@ package main
 
 import (
 	"crypto/sha256"
-	"kvstore/poseidon"
+	//"kvstore/poseidon"
 
 	"github.com/tendermint/tendermint/abci/types"
 	"github.com/tendermint/tendermint/crypto/ed25519"
 	"github.com/tendermint/tendermint/crypto/encoding"
 	"github.com/tendermint/tendermint/proto/tendermint/crypto"
-	"github.com/vocdoni/arbo"
+	//"github.com/vocdoni/arbo"
 )
 
-func (app *App) poseidon(data []byte) []byte {
-	h2, err := poseidon.HashBytes(data)
-	if err != nil {
-		logs.logError("POSEIDON ERROR________________________ _ _ _", err)
-		panic(err)
+/*
+	func (app *App) poseidon(data []byte) []byte {
+		h2, err := poseidon.HashBytes(data)
+		if err != nil {
+			logs.logError("POSEIDON ERROR________________________ _ _ _", err)
+			panic(err)
+		}
+
+		result := arbo.BigIntToBytes(32, h2)
+		return result
 	}
-
-	result := arbo.BigIntToBytes(32, h2)
-	return result
-}
-
+*/
 func (app *App) sha2(data []byte) []byte {
-	//proof of possesion
 	h := sha256.New()
 	h.Write(data)
 	sha_2 := h.Sum(nil)

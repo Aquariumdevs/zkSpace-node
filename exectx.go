@@ -242,7 +242,7 @@ func (tx *Transaction) execContract(app *App) []byte {
 		contract.writeContract(app, key)
 	}
 	data := append(tx.hash[:], contract.Address...)
-	hash := app.poseidon(data)
+	hash := app.sha2(data)
 	copy(tx.hash[:], hash)
 
 	return contract.Address

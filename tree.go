@@ -6,7 +6,7 @@ import (
 	badb "go.vocdoni.io/dvote/db/badgerdb"
 )
 
-func (app *App) createTreeDb(dbname string, levels int, poseidon bool) (*badb.BadgerDB, *arbo.Tree, error) {
+func (app *App) createTreeDb(dbname string, levels int, sha256 bool) (*badb.BadgerDB, *arbo.Tree, error) {
 	// Create a new database
 	var opts db.Options
 	opts.Path = dbname
@@ -15,10 +15,10 @@ func (app *App) createTreeDb(dbname string, levels int, poseidon bool) (*badb.Ba
 		logs.logError("Failed to access database "+dbname+" !!!", err)
 		return nil, nil, err
 	}
-	return app.createTree(dbpoint, levels, poseidon)
+	return app.createTree(dbpoint, levels, sha256)
 }
 
-func (app *App) createTree(dbpoint *badb.BadgerDB, levels int, poseidon bool) (*badb.BadgerDB, *arbo.Tree, error) {
+func (app *App) createTree(dbpoint *badb.BadgerDB, levels int, sha256 bool) (*badb.BadgerDB, *arbo.Tree, error) {
 	// Create a new tree associated with the database
 	var config arbo.Config
 
@@ -27,8 +27,8 @@ func (app *App) createTree(dbpoint *badb.BadgerDB, levels int, poseidon bool) (*
 		MaxLevels:    levels,
 		HashFunction: arbo.HashFunctionBlake2b}
 
-	if poseidon {
-		config.HashFunction = arbo.HashFunctionPoseidon
+	if sha256 {
+		config.HashFunction = arbo.HashFunctionSha256
 	}
 
 	Tree, err := arbo.NewTree(config)
