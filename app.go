@@ -14,6 +14,9 @@ import (
 	"github.com/vocdoni/arbo"
 	"go.vocdoni.io/dvote/db"
 	badb "go.vocdoni.io/dvote/db/badgerdb"
+
+	"fmt"
+	"math"
 )
 
 type App struct {
@@ -461,7 +464,7 @@ func (app *App) DeliverTx(req abcitypes.RequestDeliverTx) abcitypes.ResponseDeli
 	//add tx to the queue to be included in the tx merkle tree
 	var key [8]byte
 	copy(key[:4], tx.source)
-	copy(key[:4], tx.counter)
+	copy(key[4:], tx.counter)
 
 	app.txDbKeys = append(app.txDbKeys, key[:])
 	app.txDbVals = append(app.txDbVals, tx.hash[:])
@@ -518,7 +521,7 @@ func (app *App) Commit() abcitypes.ResponseCommit {
 		logs.logError("Failed to get the Transaction storage Tree root: ", err)
 		panic(err)
 	}
-	result := app.sha2(blockRoot)
+	result := blockRoot
 
 	validatorRoot, err := app.validatorTree.Root()
 	if err != nil {
@@ -588,15 +591,56 @@ func (app *App) Query(reqQuery abcitypes.RequestQuery) (resQuery abcitypes.Respo
 		}
 	case 8:
 		app.txDbMutex.Lock()
-		_, val1, val2, _, err := app.txStorageTree.GenProof(key)
+		k, val1, val2, _, err := app.txStorageTree.GenProof(key)
+		blockroot, _ := app.txStorageTree.Root()
 		if err != nil {
-			_, val1, val2, _, err = app.txStorageTree2.GenProof(key)
+			k, val1, val2, _, err = app.txStorageTree2.GenProof(key)
+			blockroot, _ = app.txStorageTree2.Root()
 		}
+		k2, val3, val4, _, _ := app.blockHashTree.GenProof(app.blockheight[:]) ////TODO:diff blockheight for tree2
 		app.txDbMutex.Unlock()
+		/*
+			originalK := make([]byte, len(k))
+			copy(originalK, k)
+			checkProofK := make([]byte, len(k))
+			copy(checkProofK, k)
+
+			originalVal1 := make([]byte, len(val1))
+			copy(originalVal1, val1)
+			checkProofVal1 := make([]byte, len(val1))
+			copy(checkProofVal1, val1)
+
+			originalVal2 := make([]byte, len(val2))
+			copy(originalVal2, val2)
+			checkProofVal2 := make([]byte, len(val2))
+			copy(checkProofVal2, val2)
+
+			originalBlockRoot := make([]byte, len(blockroot))
+			copy(originalBlockRoot, blockroot)
+			checkProofBlockRoot := make([]byte, len(blockroot))
+			copy(checkProofBlockRoot, blockroot)
+		*/
+		value = append(k, val1...)
+		value = append(value, blockroot...)
+		value = append(value, val2...)
+
+		/*
+			value = append(checkProofK, checkProofVal1...)
+			value = append(value, checkProofBlockRoot...)
+			value = append(value, checkProofVal2...)
+		*/
+		value = append(value, k2...)
+		value = append(value, val3...)
+		vv, _ := app.blockHashTree.Root()
+		value = append(value, vv...)
+		value = append(value, val4...)
+
+		//CheckProofPrint(originalK, originalVal1, originalBlockRoot, originalVal2)
+		//CheckProofPrint(k, val1, blockroot, val2)
+		//CheckProofPrint(k2, val3, vv, val4)
+
 		key = val1
-		value = val2
-		//value = append(val1, val2...)
-		//value = append(value, val3...)
+
 		if err != nil {
 			value = key
 		}
@@ -624,4 +668,157 @@ func (app *App) Query(reqQuery abcitypes.RequestQuery) (resQuery abcitypes.Respo
 		Key:   key,
 		Value: value,
 	}
+}
+
+// /AUX CODE TO DEBUG:
+func CheckProofPrint(k, v, root, packedSiblings []byte) (bool, error) {
+	siblings, err := UnpackSiblings(packedSiblings)
+	if err != nil {
+		return false, err
+	}
+
+	keyPath := make([]byte, int(math.Ceil(float64(len(siblings))/float64(8)))) //nolint:gomnd
+	copy(keyPath[:], k)
+
+	key, _, err := newLeafValue(k, v)
+	if err != nil {
+		return false, err
+	}
+	//fmt.Println("key:", key)
+
+	path := getPath(len(siblings), keyPath)
+	for i := len(siblings) - 1; i >= 0; i-- {
+		if path[i] {
+			key, _, err = newIntermediate(siblings[i], key)
+			if err != nil {
+				return false, err
+			}
+			//fmt.Println("L:", key)
+
+		} else {
+			key, _, err = newIntermediate(key, siblings[i])
+			if err != nil {
+				return false, err
+			}
+			//fmt.Println("R:", key)
+		}
+	}
+	if bytes.Equal(key[:], root) {
+		fmt.Println("success")
+		return true, nil
+	}
+	fmt.Println("FAIL")
+	return false, nil
+}
+
+// UnpackSiblings unpacks the siblings from a byte array.
+func UnpackSiblings(b []byte) ([][]byte, error) {
+	//fmt.Println("Unpacking:...")
+
+	fullLen := binary.LittleEndian.Uint16(b[0:2])
+	l := binary.LittleEndian.Uint16(b[2:4]) // bitmap bytes length
+	if len(b) != int(fullLen) {
+		return nil,
+			fmt.Errorf("expected len: %d, current len: %d",
+				fullLen, len(b))
+	}
+
+	bitmapBytes := b[4 : 4+l]
+	bitmap := bytesToBitmap(bitmapBytes)
+	//fmt.Println("len(bitmap): ", len(bitmap))
+	siblingsBytes := b[4+l:]
+	iSibl := 0
+	emptySibl := make([]byte, arbo.HashFunctionSha256.Len())
+	var siblings [][]byte
+	for i := 0; i < len(bitmap); i++ {
+		if iSibl >= len(siblingsBytes) {
+			break
+		}
+		if bitmap[i] {
+			siblings = append(siblings, siblingsBytes[iSibl:iSibl+arbo.HashFunctionSha256.Len()])
+			iSibl += arbo.HashFunctionSha256.Len()
+		} else {
+			siblings = append(siblings, emptySibl)
+		}
+	}
+	//fmt.Println("siblings len:", len(siblings))
+
+	//fmt.Println("siblings:", siblings)
+
+	return siblings, nil
+}
+
+func bytesToBitmap(b []byte) []bool {
+	var bitmap []bool
+	for i := 0; i < len(b); i++ {
+		for j := 0; j < 8; j++ {
+			bitmap = append(bitmap, b[i]&(1<<j) > 0)
+		}
+	}
+	return bitmap
+}
+
+func getPath(numLevels int, k []byte) []bool {
+	path := make([]bool, numLevels)
+	for n := 0; n < numLevels; n++ {
+		path[n] = k[n/8]&(1<<(n%8)) != 0
+	}
+	return path
+}
+func newLeafValue(k, v []byte) ([]byte, []byte, error) {
+	if err := checkKeyValueLen(k, v); err != nil {
+		return nil, nil, err
+	}
+	//fmt.Println("k:", k)
+	//fmt.Println("v:", v)
+	leafKey, err := arbo.HashFunctionSha256.Hash(k, v, []byte{1})
+	if err != nil {
+		return nil, nil, err
+	}
+	var leafValue []byte
+	leafValue = append(leafValue, byte(1))
+	leafValue = append(leafValue, byte(len(k)))
+	leafValue = append(leafValue, k...)
+	leafValue = append(leafValue, v...)
+
+	//fmt.Println("lk:", leafKey)
+	//fmt.Println("lv:", leafValue)
+
+	return leafKey, leafValue, nil
+}
+
+// newIntermediate takes the left & right keys of a intermediate node, and
+// computes its hash. Returns the hash of the node, which is the node key, and a
+// byte array that contains the value (which contains the left & right child
+// keys) to store in the DB.
+// [     1 byte   |     1 byte         | N bytes  |  N bytes  ]
+// [ type of node | length of left key | left key | right key ]
+func newIntermediate(l, r []byte) ([]byte, []byte, error) {
+	b := make([]byte, 2+arbo.HashFunctionSha256.Len()*2)
+	b[0] = 2
+	if len(l) > int(^uint8(0)) {
+		return nil, nil, fmt.Errorf("newIntermediate: len(l) > %v", int(^uint8(0)))
+	}
+	b[1] = byte(len(l))
+	copy(b[2:2+arbo.HashFunctionSha256.Len()], l)
+	copy(b[2+arbo.HashFunctionSha256.Len():], r)
+
+	key, err := arbo.HashFunctionSha256.Hash(l, r)
+	if err != nil {
+		return nil, nil, err
+	}
+	//fmt.Println("IM:", key)
+
+	return key, b, nil
+}
+func checkKeyValueLen(k, v []byte) error {
+	if len(k) > int(^uint8(0)) {
+		return fmt.Errorf("len(k)=%v, can not be bigger than %v",
+			len(k), int(^uint8(0)))
+	}
+	if len(v) > int(^uint16(0)) {
+		return fmt.Errorf("len(v)=%v, can not be bigger than %v",
+			len(v), int(^uint16(0)))
+	}
+	return nil
 }
